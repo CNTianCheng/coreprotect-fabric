@@ -1,0 +1,72 @@
+name: Bug 报告 / Bug Report
+description: 提交模组问题（崩溃、功能异常、记录缺失等）
+title: "[Bug] 简短描述问题"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量完整填写，便于快速定位问题。
+        Thanks for reporting! Please fill in as much detail as possible.
+  - type: input
+    id: mc_version
+    attributes:
+      label: Minecraft 版本 / Minecraft version
+      placeholder: 例如 1.21
+    validations:
+      required: true
+  - type: input
+    id: mod_version
+    attributes:
+      label: 模组版本 / Mod version
+      placeholder: 例如 1.7.2
+    validations:
+      required: true
+  - type: input
+    id: loader
+    attributes:
+      label: Fabric Loader 与 Fabric API 版本
+      placeholder: 例如 Loader 0.16.9 + API 0.102.0
+  - type: dropdown
+    id: server_type
+    attributes:
+      label: 服务端类型 / Server type
+      options:
+        - 专用服务器（Dedicated Server）
+        - 局域网联机 / 单人开放（Singleplayer LAN）
+        - 其他 / Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 / Description
+      description: 发生了什么？预期是什么？
+      placeholder: 例如：检查模式下右键方块没有显示历史……
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: |
+        1. 执行 /co i
+        2. 左键点击方块
+        3. ……
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: /co status 输出（可选）
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / Relevant logs
+      description: 服务器日志（logs/latest.log）中含 CoreProtect 或报错的行
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: 其他补充 / Additional context

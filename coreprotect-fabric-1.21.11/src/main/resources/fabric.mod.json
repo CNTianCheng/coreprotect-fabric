@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "coreprotect",
+  "version": "${version}",
+  "name": "CoreProtect Fabric",
+  "description": "CoreProtect-style block/container logging, rollback, restore, lookup and inspection for Fabric servers. 濠电姷鏁告慨鐑藉极閸涘﹥鍙忓ù鍏兼綑閸ㄥ倸鈹戦崒婊庣劸闁哄嫨鍎甸弻鈥愁吋閸愩劌顬嬮梺宕囨嚀缁夌數鎹㈠☉姗嗗晠妞ゆ梻绮崰姘舵⒑鏉炴壆顦︽い鎴濐樀瀵寮撮敍鍕澑闁诲函缍嗘禍鐐寸妤ｅ啯鈷戦柟鑲╁仜閳ь剚娲熼弫鍐敂閸繆鎽曢悗骞垮劚閻楁粌顬婇妸鈺傗拺闁告稑锕ョ亸鐢告煕閻樻煡鍙勬い銏″哺閺佹劖寰勬繛鈶╂櫊閺屽秹宕崟鑸垫暰闂佸搫鎷嬮崜娆撳煘閹达附鍊烽柡澶嬪灩娴犵顪冮妶搴″箹婵炲眰鍊曞畵?(EN/缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸ゅ嫰鏌ょ粙璺ㄤ粵闁告瑥绻戦妵鍕箻閸楃偟浠肩紒鐐劤椤兘寮婚悢鐓庣闁归偊鍟╁鍛枑闁绘鐗嗙粭姘舵煛閸涱喚鍙€闁哄本鐩崺鍕礂閻欌偓娴滎亪骞嗗畝鍕垫晪闁逞屽墮椤繐煤椤忓懎浜楅柟鑹版彧缁茶偐鍒掗悽鍛娾拺闁硅偐鍋涙俊濂告煟韫囨梻绠炴い?缂傚倸鍊搁崐鎼佸磹閹间礁纾圭€瑰嫭鍣磋ぐ鎺戠倞妞ゆ帒顦伴弲鈺傜節閻㈤潧孝閻庢凹鍙冮、鏇㈡嚍閵夛箑寮垮┑鈽嗗灠閻忔繈鎮￠幇鐗堢厱閻庯綆鍓欓弸娑㈡煛鐏炵偓绀冪紒缁樼箚缁犳盯骞欓崘鈺佹灎闂傚倷绀佺壕顓犲垝椤栨凹娼栫憸鐗堝笒妗呴梺鍛婃处閸ㄦ壆绮绘繝姘仯闁惧繒鎳撻崝瀣煟鎼淬劎鐣烘慨?闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾妤犵偞鐗犻、鏇㈡晝閳ь剟鎮块鈧弻鏇熺箾閻愵剚鐝旂紒鐐劤濞硷繝寮婚悢铏圭＜婵☆垱妞介崵瀣⒑閸忓吋绶叉繛纭风節瀵鎮㈢亸浣圭亖闂佸壊鐓堥崰妤呮倶瀹ュ鈷?.",
+  "authors": [
+    "CoreProtect Fabric Contributors"
+  ],
+  "contact": {
+    "sources": "https://github.com/example/coreprotect-fabric"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "net.coreprotect.fabric.CoreProtectFabric"
+    ]
+  },
+  "mixins": [
+    "coreprotect.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "1.21.11",
+    "java": ">=21"
+  }
+}
+

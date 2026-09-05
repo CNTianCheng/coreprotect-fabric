@@ -1,0 +1,16 @@
+# 换行符约定：文本文件统一 LF（Windows 开发请设置 git config core.autocrlf input）
+* text=auto
+*.java text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.gradle text eol=lf
+*.properties text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
+*.toml text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jar binary

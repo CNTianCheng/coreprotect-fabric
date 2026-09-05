@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "coreprotect",
+  "version": "${version}",
+  "name": "CoreProtect Fabric",
+  "description": "CoreProtect-style block/container logging, rollback, restore, lookup and inspection for Fabric servers. 濠电姷鏁告慨浼村垂婵傜鏄ラ柡宥冨妿閳瑰秵绻涘顔绘喚闁轰礁顑夐弻鏇＄疀鐎ｎ亞浠鹃梺鎼炲€曢敃顏堝蓟瀹ュ牜妾ㄩ梺鍛婃尵閸犲酣顢氶敐澶娢╅柍鍝勶攻閺咁剙鈹戦悙鏉戠仸妞ゎ厼娲ゅ嵄?(EN/缂傚倸鍊搁崐鐑芥嚄閼稿灚鍙忔い鎾卞灩绾惧鏌熼幑鎰滅憸鐗堝笚閺呮煡鏌涢埄鍏狀亪鎯岄鈧娲偂鎼达絼绮甸梺鎼炲妼閻忔繈顢?缂傚倸鍊搁崐宄懊归崶顒夋晩濠电姴瀚鑺ユ叏濡灝鐓愰柛瀣枛閺屾洘绻濊箛鎿冩喘闂佸磭绮褰掑Φ閸曨垰绠婚悹铏瑰劋閻庨箖姊?闂傚倸鍊风粈渚€骞栭锕€鐤柕濞炬櫅绾惧潡鏌熺紒妯洪嚋闁兼澘娼￠弻鐔封枔閸喗鐏嶉梺?.",
+  "authors": [
+    "CoreProtect Fabric Contributors"
+  ],
+  "contact": {
+    "sources": "https://github.com/example/coreprotect-fabric"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "net.coreprotect.fabric.CoreProtectFabric"
+    ]
+  },
+  "mixins": [
+    "coreprotect.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "1.21.9",
+    "java": ">=21"
+  }
+}
+
