@@ -1,4 +1,4 @@
-# CoreProtect Fabric — Mod Overview (v1.7.2)
+# CoreProtect Fabric — Mod Overview (v1.8.1)
 
 ## One-Line Summary
 
@@ -106,7 +106,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 | Minecraft | **1.21** (for 1.21.1, use the matching build in the `coreprotect-fabric/` directory) |
 | Server | Fabric Loader ≥ 0.16 + Fabric API |
 | Java | 21 |
-| Install | Drop `coreprotect-fabric-1.21-1.7.2.jar` into `mods/`; config and database are generated on first launch |
+| Install | Drop `coreprotect-fabric-1.21-1.8.1.jar` into `mods/`; config and database are generated on first launch |
 
 > The mod is also available for the full range 1.21.2 ~ 1.21.11 and 26.1 ~ 26.2 (each build lives in its own project directory) with the same feature set.
 
@@ -117,7 +117,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 - **Dispute forensics**: inspection mode pinpoints the on-site history quickly; `/co online` verifies player join/leave times
 - **Server administration**: session/command/chat logs plus automatic data pruning assist audits and moderation
 
-## Known Limitations (v1.7.2)
+## Known Limitations (v1.8.1)
 
 - Hopper (`#hopper`), dropper (`#dropper`) and dispenser (`#dispenser`) transactions are all logged
 - Item-drop logging covers player drops and pickups; drops spawned by breaking blocks are not recorded separately (they are already part of the block-break record)

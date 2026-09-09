@@ -29,12 +29,13 @@
 - **多语言**：en_us / zh_cn / zh_tw / ja_jp，默认自动跟随客户端语言，也可用 `/co language <code>` 手动切换（按玩家持久化）
 - **数据清理**：`/co purge t:<时间>`
 - **SQLite 数据库**：异步写入、游戏线程零阻塞；读取走独立多线程连接池（多核并行）；**压缩存储**：方块状态/物品字符串字典化（v2 结构，旧库首次启动自动迁移备份并压缩）；`/co purge` 后自动压缩文件；mmap 内存映射 + 可调缓存（`database.cacheSizeMB`，默认 128MB）
+- **崩溃/断电保护**：WAL 每次提交刷盘（`syncMode: full`）；异常关闭自动检测并在启动时校验（quick_check）；定期热备份 `coreprotect.db.backup`；检测到损坏时**自动从备份恢复**（原件另存为 `.corrupt-<时间>`）
 - **CoreProtect 同款配色**（v22+ 样式）：通用消息前缀为深青色 `CoreProtect - ` + 白色文字；查询标题 `----- CoreProtect | Lookup Results -----`；查询行按"灰色时间 + 绿色`+`/红色`-`标记 + 深青色玩家 + 白色动作 + 深青色对象"着色；状态行为深青色标签 + 白色数值
 
 ## 📥 安装
 
 1. 需要 **Java 21** 和 **Fabric Loader 0.16+**（服务端），并安装 **Fabric API**。
-2. 将 `coreprotect-fabric-1.21-1.7.2.jar` 放入服务端 `mods/` 文件夹。
+2. 将 `coreprotect-fabric-1.21-1.8.1.jar` 放入服务端 `mods/` 文件夹。
 3. 启动服务器。数据库默认创建在游戏目录下的 `coreprotect.db`，配置在 `config/coreprotect-fabric.json`。
 
 ## 🛠 自行构建
@@ -42,7 +43,7 @@
 ```bash
 # 需要 JDK 21
 ./gradlew build
-# 产物位于 build/libs/coreprotect-fabric-1.21-1.7.2.jar
+# 产物位于 build/libs/coreprotect-fabric-1.21-1.8.1.jar
 ```
 
 ## 🎮 命令
@@ -124,8 +125,12 @@
       "admin": { "players": [], "permissions": ["all"] }
     }
   },
-  "database": {                  // 数据库调优
-    "cacheSizeMB": 128           // 每连接页面缓存（越大查询越快，占用内存越多）
+  "database": {                  // 数据库调优与安全
+    "cacheSizeMB": 128,          // 每连接页面缓存（越大查询越快，占用内存越多）
+    "syncMode": "full",          // full=每次提交刷盘（断电也不丢已提交数据）；normal=更快
+    "checkpointMinutes": 10,     // WAL 检查点间隔（越小崩溃恢复越快）
+    "backupMinutes": 360,        // 在线热备份间隔（写 coreprotect.db.backup）；0=关闭
+    "autoRestoreBackup": true    // 检测到损坏时自动从备份恢复
   },
   "dataRetention": {             // 数据保存时间限制
     "enabled": false,            // 开启后，服务器启动时自动删除过期数据

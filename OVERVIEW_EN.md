@@ -46,7 +46,7 @@ After `/co inspect`: **left-click** a block to view its history, **right-click**
 - `/co purge t:<time>` prunes old data, `/co reload` hot-reloads, `/co status` shows statistics
 - **Four languages**: English / 简体中文 / 繁體中文 / 日本語, automatically following the client language, with manual switching via `/co language <code>` (persisted per player)
 
-## 1.21-Build Enhancements (v1.7.2 Flagship)
+## 1.21-Build Enhancements (v1.8.1 Flagship)
 
 The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared feature set:
 
@@ -63,6 +63,8 @@ The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared featu
 | v1.7.0 | Database space compression: dictionary-encoded block states/items (schema v2, legacy DBs auto-migrate with backup + VACUUM, measured 12.55MB -> 8.3MB); auto-compact after /co purge; faster queries: mmap memory mapping, configurable cache (database.cacheSizeMB), read pool up to 8 threads |
 | v1.7.1 | Fixed bStats registration: report platform corrected from fabric to server-implementation (the platform service 33739 is registered under), old configs migrate automatically |
 | v1.7.2 | bStats now reports the player count (custom "players" single-line chart; pair it with a players chart on the bstats.org service page to display online players) |
+| v1.8.0 | Crash protection: per-commit WAL fsync (synchronous=full), unclean-shutdown detection with startup quick_check, periodic WAL checkpoints |
+| v1.8.1 | Power-loss protection: periodic hot backups (VACUUM INTO, default every 6 hours), automatic restore from the backup when corruption is detected (original kept aside), reader connections reopen on restore |
 
 ## Version Matrix (16 Builds)
 
@@ -70,7 +72,7 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 
 | Minecraft | Mod version | Jar file | Project directory | Java |
 |---|---|---|---|---|
-| 1.21 | 1.7.2 (flagship) | `coreprotect-fabric-1.21-1.7.2.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.8.1 (flagship) | `coreprotect-fabric-1.21-1.8.1.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |

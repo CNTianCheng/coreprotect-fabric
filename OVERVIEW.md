@@ -46,7 +46,7 @@
 - `/co purge t:<时间>` 清理旧数据、`/co reload` 热重载、`/co status` 查看统计
 - **四种语言**：English / 简体中文 / 繁體中文 / 日本語，自动跟随客户端语言，可 `/co language <代码>` 手动切换（按玩家持久化）
 
-## 1.21 版增强功能（v1.7.2 旗舰版）
+## 1.21 版增强功能（v1.8.1 旗舰版）
 
 `coreprotect-fabric-1.21/` 工程持续迭代，在共有功能之上新增：
 
@@ -63,6 +63,8 @@
 | v1.7.0 | 数据库空间压缩：方块状态/物品字符串字典化存储（v2 schema，旧库自动迁移+备份+VACUUM 压缩，实测 12.55MB→8.3MB）；/co purge 后自动压缩文件；查询再提速：mmap 内存映射、可配缓存（database.cacheSizeMB）、读取池扩至 8 线程 |
 | v1.7.1 | 修复 bStats 无法注册：上报平台由 fabric 更正为 server-implementation（服务 33739 实际注册平台），旧配置自动迁移 |
 | v1.7.2 | bStats 增加玩家数上报（customCharts 的 players 单线图，配合 bstats.org 服务页的 players 图表显示在线人数） |
+| v1.8.0 | 崩溃防护：WAL 提交每次刷盘（synchronous=full）、异常关闭检测 + 启动时 quick_check 完整性校验、周期性 WAL 检查点 |
+| v1.8.1 | 断电级防护：定期在线热备份（VACUUM INTO，默认 6 小时）、检测到损坏时自动从备份恢复（损坏原件另存），读连接代际自动重开 |
 
 ## 版本矩阵（16 个构建）
 
@@ -70,7 +72,7 @@
 
 | Minecraft | 模组版本 | Jar 文件名 | 工程目录 | Java |
 |---|---|---|---|---|
-| 1.21 | 1.7.2（旗舰） | `coreprotect-fabric-1.21-1.7.2.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.8.1（旗舰） | `coreprotect-fabric-1.21-1.8.1.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |

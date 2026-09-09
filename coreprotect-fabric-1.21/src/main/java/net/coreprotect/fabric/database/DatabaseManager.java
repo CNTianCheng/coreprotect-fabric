@@ -112,7 +112,7 @@ public final class DatabaseManager {
     private static final String[] COUNT_TABLES = {
             "co_block", "co_container", "co_item", "co_sign", "co_entity", "co_session", "co_command", "co_chat"};
 
-    private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
+    private final java.util.concurrent.ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "CoreProtect-DB");
         t.setDaemon(true);
         return t;
@@ -123,7 +123,9 @@ public final class DatabaseManager {
         t.setDaemon(true);
         return t;
     });
-    private final ThreadLocal<Connection> readConnection = new ThreadLocal<>();
+    private final ThreadLocal<Object[]> readHolder = new ThreadLocal<>();
+    /** Bumped after an automatic restore so reader threads reopen their connections. */
+    private final java.util.concurrent.atomic.AtomicInteger generation = new java.util.concurrent.atomic.AtomicInteger();
 
     /** Recently seen player names (for /co lookup u: suggestions). */
     private final Set<String> recentUsers = Collections.synchronizedSet(new LinkedHashSet<>());
@@ -170,21 +172,7 @@ public final class DatabaseManager {
                 Class.forName("org.sqlite.JDBC");
                 conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
                 applyPragmas(conn, false);
-                int version = userVersion(conn);
-                boolean legacy = version < 2 && hasColumn(conn, "co_block", "old_data");
-                if (legacy) {
-                    migrateV1ToV2(conn);
-                } else {
-                    try (Statement st = conn.createStatement()) {
-                        st.execute("PRAGMA auto_vacuum=INCREMENTAL");
-                        for (String ddl : DDL_V2) {
-                            st.executeUpdate(ddl);
-                        }
-                        if (version < 2) {
-                            st.executeUpdate("PRAGMA user_version=2");
-                        }
-                    }
-                }
+                initSchema(conn);
                 open = true;
                 return null;
             }).get(30, TimeUnit.MINUTES);
@@ -195,6 +183,27 @@ public final class DatabaseManager {
         if (legacyMigrated) {
             // rebuild the file in the background so the dropped text columns actually free disk space
             vacuumAsync();
+        }
+        scheduleCheckpoints();
+        scheduleBackups();
+    }
+
+    /** Schema setup (version check, one-time v1->v2 migration, DDL). Runs on the writer connection. */
+    private void initSchema(Connection c) throws SQLException {
+        int version = userVersion(c);
+        boolean legacy = version < 2 && hasColumn(c, "co_block", "old_data");
+        if (legacy) {
+            migrateV1ToV2(c);
+        } else {
+            try (Statement st = c.createStatement()) {
+                st.execute("PRAGMA auto_vacuum=INCREMENTAL");
+                for (String ddl : DDL_V2) {
+                    st.executeUpdate(ddl);
+                }
+                if (version < 2) {
+                    st.executeUpdate("PRAGMA user_version=2");
+                }
+            }
         }
     }
 
@@ -290,14 +299,120 @@ public final class DatabaseManager {
             st.execute("PRAGMA mmap_size=1073741824");
             st.execute("PRAGMA temp_store=MEMORY");
             if (readOnly) {
+                st.execute("PRAGMA synchronous=NORMAL");
                 st.execute("PRAGMA query_only=ON");
             } else {
                 st.execute("PRAGMA journal_mode=WAL");
-                st.execute("PRAGMA synchronous=NORMAL");
+                // full = WAL fsync'd on every commit (max crash safety, default); normal = faster
+                st.execute("PRAGMA synchronous=" + CoreProtectFabric.instance().config().database.syncMode.toUpperCase());
             }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to apply SQLite pragmas", e);
         }
+    }
+
+    /**
+     * Runs {@code PRAGMA quick_check} after an unclean shutdown was detected. If the
+     * database reports errors, a recovery copy of the db/wal/shm files is kept next
+     * to the original so no data is lost while investigating.
+     */
+    public void quickCheck() {
+        execute(() -> {
+            String result = quickCheckResult(conn);
+            if ("ok".equalsIgnoreCase(result)) {
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Database integrity check passed (quick_check: ok).");
+                return null;
+            }
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Database integrity check reported: {}", result);
+            try {
+                String ts = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+                Path db = dbPath;
+                Path wal = db.resolveSibling(db.getFileName() + "-wal");
+                Path shm = db.resolveSibling(db.getFileName() + "-shm");
+                Path corruptDir = db.resolveSibling(db.getFileName() + ".corrupt-" + ts);
+                Files.createDirectories(corruptDir);
+                try {
+                    conn.close();
+                } catch (SQLException ignored) {
+                }
+                conn = null;
+                if (Files.exists(db)) Files.move(db, corruptDir.resolve(db.getFileName()));
+                if (Files.exists(wal)) Files.move(wal, corruptDir.resolve(wal.getFileName()));
+                if (Files.exists(shm)) Files.move(shm, corruptDir.resolve(shm.getFileName()));
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Corrupted files moved to {}", corruptDir);
+
+                Path backup = db.resolveSibling(db.getFileName() + ".backup");
+                boolean restored = false;
+                if (CoreProtectFabric.instance().config().database.autoRestoreBackup && Files.exists(backup)) {
+                    try (Connection bc = DriverManager.getConnection("jdbc:sqlite:" + backup)) {
+                        if ("ok".equalsIgnoreCase(quickCheckResult(bc))) {
+                            Files.copy(backup, db);
+                            restored = true;
+                        }
+                    }
+                }
+                // reopen the writer connection against the (restored or fresh) file
+                Class.forName("org.sqlite.JDBC");
+                conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                applyPragmas(conn, false);
+                initSchema(conn);
+                generation.incrementAndGet(); // reader threads reopen their connections on next use
+                if (restored) {
+                    CoreProtectFabric.LOGGER.info("[CoreProtect] Database restored from the latest backup ({}).", backup.getFileName());
+                } else {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] No valid backup found; the database was re-initialized empty. "
+                            + "The corrupted copy is kept in {} for manual recovery.", corruptDir);
+                }
+            } catch (Exception recoveryError) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Automatic recovery failed", recoveryError);
+            }
+            return null;
+        });
+    }
+
+    private static String quickCheckResult(Connection c) {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery("PRAGMA quick_check")) {
+            return rs.next() ? rs.getString(1) : "unknown";
+        } catch (SQLException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /** Periodically checkpoints the WAL so crash recovery stays fast. */
+    private void scheduleCheckpoints() {
+        int minutes = CoreProtectFabric.instance().config().database.checkpointMinutes;
+        worker.scheduleWithFixedDelay(() -> {
+            if (!open) return;
+            try (Statement st = conn.createStatement()) {
+                st.execute("PRAGMA wal_checkpoint(PASSIVE)");
+            } catch (SQLException e) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] WAL checkpoint failed: {}", e.toString());
+            }
+        }, minutes, minutes, TimeUnit.MINUTES);
+    }
+
+    /** Periodically writes a hot backup of the database to <db>.backup (VACUUM INTO = consistent snapshot). */
+    private void scheduleBackups() {
+        int minutes = CoreProtectFabric.instance().config().database.backupMinutes;
+        if (minutes <= 0) return;
+        worker.scheduleWithFixedDelay(() -> {
+            if (!open) return;
+            try {
+                Path target = dbPath.resolveSibling(dbPath.getFileName() + ".backup");
+                Path tmp = dbPath.resolveSibling(dbPath.getFileName() + ".backup.tmp");
+                Files.deleteIfExists(tmp);
+                String sql = "VACUUM INTO '" + tmp.toAbsolutePath().toString().replace("'", "''") + "'";
+                try (Statement st = conn.createStatement()) {
+                    st.execute(sql);
+                }
+                Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Database backup written: {} ({} MB).",
+                        target.getFileName(), Files.size(target) / (1024 * 1024));
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Database backup failed: {}", e.toString());
+            }
+        }, minutes, minutes, TimeUnit.MINUTES);
     }
 
     public void close() {
@@ -326,8 +441,8 @@ public final class DatabaseManager {
         // one cleanup task per reader thread: runs on that thread and closes its connection
         for (int i = 0; i < readThreads; i++) {
             readPool.submit(() -> {
-                Connection c = readConnection.get();
-                if (c != null) {
+                Object[] holder = readHolder.get();
+                if (holder != null && holder[1] instanceof Connection c) {
                     try {
                         c.close();
                     } catch (SQLException ignored) {
@@ -895,19 +1010,20 @@ public final class DatabaseManager {
 
     /** The caller-thread read connection (lazily opened, query-only). */
     private Connection readConnection() {
-        Connection c = readConnection.get();
-        if (c == null) {
-            try {
-                Class.forName("org.sqlite.JDBC");
-                c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-                applyPragmas(c, true);
-                readConnection.set(c);
-            } catch (Exception e) {
-                CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to open read connection", e);
-                return null;
-            }
+        Object[] holder = readHolder.get();
+        if (holder != null && (Integer) holder[0] == generation.get() && holder[1] instanceof Connection c) {
+            return c;
         }
-        return c;
+        try {
+            Class.forName("org.sqlite.JDBC");
+            Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+            applyPragmas(c, true);
+            readHolder.set(new Object[] { generation.get(), c });
+            return c;
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to open read connection", e);
+            return null;
+        }
     }
 
     /** Resolves a state string to its dictionary id (writer thread only, cached). */

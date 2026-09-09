@@ -1,5 +1,7 @@
 package net.coreprotect.fabric;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Set;
 
 import net.coreprotect.fabric.command.CoCommand;
@@ -21,6 +23,7 @@ import net.coreprotect.fabric.util.NaturalBreakCause;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.coreprotect.fabric.util.UpdateChecker;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.block.AbstractFireBlock;
@@ -38,7 +41,7 @@ import org.slf4j.LoggerFactory;
 
 public final class CoreProtectFabric implements ModInitializer {
     public static final String MOD_ID = "coreprotect";
-    public static final String MOD_VERSION = "1.7.2";
+    public static final String MOD_VERSION = "1.8.1";
     public static final Logger LOGGER = LoggerFactory.getLogger("CoreProtect");
 
     /**
@@ -128,9 +131,24 @@ public final class CoreProtectFabric implements ModInitializer {
 
     private void onServerStarted(MinecraftServer srv) {
         this.server = srv;
+        // Crash detection: the marker only exists while the server is running. If it is
+        // still there from the previous run, the last shutdown was not clean (crash).
+        Path crashMarker = FabricLoader.getInstance().getConfigDir().resolve("coreprotect-fabric.crash-marker");
+        boolean uncleanShutdown = Files.exists(crashMarker);
+        if (uncleanShutdown) {
+            LOGGER.warn("[CoreProtect] Previous shutdown was not clean (server crash detected); verifying the database...");
+        }
         this.config.load();
         this.translator.load(this.config.language);
         this.database.open();
+        if (uncleanShutdown) {
+            this.database.quickCheck();
+        }
+        try {
+            Files.writeString(crashMarker, String.valueOf(System.currentTimeMillis()));
+        } catch (Exception e) {
+            LOGGER.warn("[CoreProtect] Failed to write the crash marker", e);
+        }
         LOGGER.info("[CoreProtect] Enabled. Database: {}, default language: {}",
                 this.database.dbPath(), this.config.language);
         CoreProtectConfig.DataRetention r = this.config.dataRetention;
@@ -154,6 +172,12 @@ public final class CoreProtectFabric implements ModInitializer {
         }
         this.containerTracker.finalizeAll();
         this.database.close();
+        // Graceful shutdown: remove the crash marker so the next start knows everything was closed cleanly.
+        try {
+            Files.deleteIfExists(FabricLoader.getInstance().getConfigDir().resolve("coreprotect-fabric.crash-marker"));
+        } catch (Exception e) {
+            LOGGER.warn("[CoreProtect] Failed to remove the crash marker", e);
+        }
         this.server = null;
         LOGGER.info("[CoreProtect] Disabled.");
     }

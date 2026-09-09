@@ -116,6 +116,14 @@ public final class CoreProtectConfig {
     public static class Database {
         /** SQLite page cache per connection, in MB (larger = faster reads, more RAM). */
         public int cacheSizeMB = 128;
+        /** WAL durability: "full" fsyncs every commit (max crash safety, default); "normal" is faster. */
+        public String syncMode = "full";
+        /** How often the WAL is checkpointed in the background, in minutes (smaller WAL = faster crash recovery). */
+        public int checkpointMinutes = 10;
+        /** How often a hot backup (VACUUM INTO) is written to <db>.backup, in minutes (0 = disabled). */
+        public int backupMinutes = 360;
+        /** When integrity checking finds a corrupt database, restore it from <db>.backup automatically. */
+        public boolean autoRestoreBackup = true;
     }
 
     public static class UpdateCheck {
@@ -173,6 +181,9 @@ public final class CoreProtectConfig {
             if (loaded.updateCheck != null) this.updateCheck = loaded.updateCheck;
             if (loaded.database != null) this.database = loaded.database;
             if (this.database.cacheSizeMB < 16) this.database.cacheSizeMB = 128;
+            if (!"normal".equalsIgnoreCase(this.database.syncMode)) this.database.syncMode = "full";
+            if (this.database.checkpointMinutes < 1) this.database.checkpointMinutes = 10;
+            if (this.database.backupMinutes < 0) this.database.backupMinutes = 360;
             if (this.permissionGroups.groups == null) this.permissionGroups.groups = new java.util.LinkedHashMap<>();
             if (this.lookup.maxLines < 1) this.lookup.maxLines = 10;
             if (this.lookup.inspectLines < 1) this.lookup.inspectLines = 8;
