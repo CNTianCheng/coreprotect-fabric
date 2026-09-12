@@ -7,22 +7,22 @@ import net.coreprotect.fabric.util.TimeUtil;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Container;
-import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.Container;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
 
 public final class BlockEventListener {
 
@@ -78,8 +78,14 @@ public final class BlockEventListener {
 
         if (mod.inspector().isInspecting(sp)) {
             ItemStack stack = sp.getItemInHand(hand);
-            if (stack.getItem() instanceof BlockItem) {
-                return InteractionResult.PASS; // allow placement; the deferred check performs a block lookup
+            if (world.getBlockState(hit.getBlockPos()).isAir()) {
+                // Clicking air: nothing to inspect and no block-type lookup (matches CoreProtect).
+                return InteractionResult.PASS;
+            }
+            if (stack.getItem() instanceof BlockItem item) {
+                // CoreProtect behavior: cancel the placement and run a lookup for the held block type instead
+                mod.inspector().lookupForBlock(sp, item.getBlock());
+                return InteractionResult.FAIL;
             }
             mod.inspector().showAdjacentHistory(sp, world, hit);
             return InteractionResult.FAIL;

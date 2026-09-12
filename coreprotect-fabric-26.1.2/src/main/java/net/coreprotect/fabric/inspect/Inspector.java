@@ -12,18 +12,17 @@ import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.Messages;
 import net.coreprotect.fabric.util.TimeUtil;
-import net.minecraft.ChatFormatting;
-import net.minecraft.commands.CommandSourceStack;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.network.chat.Component;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Container;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.Container;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 
 /**
  * Inspection mode (CoreProtect-style): left-click shows the block history,
@@ -46,6 +45,16 @@ public final class Inspector {
         return true;
     }
 
+    /** Enables inspection (idempotent). */
+    public void enable(ServerPlayer player) {
+        active.add(player.getUUID());
+    }
+
+    /** Disables inspection (idempotent). */
+    public void disable(ServerPlayer player) {
+        active.remove(player.getUUID());
+    }
+
     public void showBlockHistory(ServerPlayer player, Level world, BlockPos pos) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
@@ -55,21 +64,29 @@ public final class Inspector {
         List<DatabaseManager.BlockLog> blocks = mod.database().queryBlockHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
         List<DatabaseManager.ContainerLog> containers =
                 mod.database().queryContainerHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
+        List<DatabaseManager.SignLog> signs =
+                mod.database().querySignHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
         BlockState current = world.getBlockState(pos);
-        Messages.header(source, "coreprotect.inspect.block.header",
+        Messages.coreHeader(source, "coreprotect.inspect.block.coords",
                 pos.getX(), pos.getY(), pos.getZ(),
                 BlockStateUtil.displayName(BlockStateUtil.stringify(current)));
         if (blocks == null || blocks.isEmpty()) {
-            Messages.plain(source, "coreprotect.inspect.block.empty");
+            Messages.cmd(source, "coreprotect.inspect.block.empty");
         } else {
-            for (String row : LookupService.formatBlockRows(source, blocks, 1)) {
-                Messages.send(source, Component.literal(row).withStyle(ChatFormatting.GRAY));
+            for (Component row : LookupService.formatBlockRows(source, blocks)) {
+                Messages.send(source, row);
             }
         }
         if (containers != null && !containers.isEmpty()) {
-            Messages.header(source, "coreprotect.inspect.container.header", pos.getX(), pos.getY(), pos.getZ());
-            for (String row : LookupService.formatContainerRows(source, containers, 1)) {
-                Messages.send(source, Component.literal(row).withStyle(ChatFormatting.GRAY));
+            Messages.title(source, "coreprotect.inspect.container.header", pos.getX(), pos.getY(), pos.getZ());
+            for (Component row : LookupService.formatContainerRows(source, containers)) {
+                Messages.send(source, row);
+            }
+        }
+        if (signs != null && !signs.isEmpty()) {
+            Messages.title(source, "coreprotect.inspect.sign.header", pos.getX(), pos.getY(), pos.getZ());
+            for (Component row : LookupService.formatSignRows(source, signs)) {
+                Messages.send(source, row);
             }
         }
     }

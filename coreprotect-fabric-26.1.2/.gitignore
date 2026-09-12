@@ -9,3 +9,10 @@ out/
 .project
 .settings/
 bin/
+
+# local build/test artefacts
+*-log.txt
+server-err.txt
+quick-err.txt
+build-errors*.txt
+mixin-diag*.txt

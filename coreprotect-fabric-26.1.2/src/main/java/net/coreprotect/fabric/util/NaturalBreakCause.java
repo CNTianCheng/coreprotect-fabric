@@ -5,7 +5,7 @@ import net.minecraft.core.BlockPos;
 /**
  * Thread-local marker used by the natural-event mixins. A cause is set right
  * before vanilla code modifies the world (explosion, fire spread, fluid flow,
- * piston, enderman, leaf decay) and cleared right after, so the {@code Level}
+ * piston, enderman, leaf decay) and cleared right after, so the {@code World}
  * hooks can attribute the block change to the correct "user" (e.g. {@code #fire}).
  *
  * <p>Set/clear are reference-counted per cause type so recursive callers
@@ -23,9 +23,9 @@ public final class NaturalBreakCause {
     public static final class Cause {
         public final String type;
         public int depth = 1;
-        /** Position just logged through a break/remove hook; guards nested setBlock calls. */
+        /** Position just logged through a break/remove hook; guards nested setBlockState calls. */
         public BlockPos lastBreakPos;
-        /** Position just logged through a setBlock hook; guards delegated overloads. */
+        /** Position just logged through a setBlockState hook; guards delegated overloads. */
         public BlockPos lastSetPos;
 
         public Cause(String type) {

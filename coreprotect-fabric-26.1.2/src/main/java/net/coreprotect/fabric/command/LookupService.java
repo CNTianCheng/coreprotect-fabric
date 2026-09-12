@@ -13,14 +13,15 @@ import net.coreprotect.fabric.i18n.Translator;
 import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.Messages;
 import net.coreprotect.fabric.util.TimeUtil;
-import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
-import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.ChatFormatting;
 
 /**
- * Shared lookup implementation: formats DB rows into translated chat lines.
- * Used by /co lookup and by inspection mode.
+ * Shared lookup implementation. Rows are formatted like the CoreProtect plugin (v22+):
+ * {@code <gray>time</gray> <green/red>+/-</green/red> <dark aqua>user</dark aqua> <white>verb</white> <dark aqua>subject</dark aqua>.}
  */
 public final class LookupService {
     private static final Gson GSON = new Gson();
@@ -29,7 +30,7 @@ public final class LookupService {
 
     private static final Set<String> VALID_ACTIONS = Set.of(
             "block", "+block", "-block", "#container", "#kill", "#kills", "#chat",
-            "#command", "#session", "+session", "-session");
+            "#command", "#session", "+session", "-session", "item", "#item", "#sign");
 
     private LookupService() {
     }
@@ -50,129 +51,233 @@ public final class LookupService {
 
         int pageSize = mod.config().lookup.maxLines;
         long offset = Math.max(0, (long) (c.page - 1) * pageSize);
-        List<String> rows = new ArrayList<>();
+        List<Component> rows = new ArrayList<>();
 
         switch (action) {
             case "#container" ->
-                    rows.addAll(formatContainerRows(source, orEmpty(mod.database().queryContainers(c, pageSize, offset)), 1));
+                    rows.addAll(formatContainerRows(source, orEmpty(mod.database().queryContainers(c, pageSize, offset))));
+            case "item", "#item" ->
+                    rows.addAll(formatItemRows(source, orEmpty(mod.database().queryItems(c, pageSize, offset))));
+            case "#sign" ->
+                    rows.addAll(formatSignRows(source, orEmpty(mod.database().querySigns(c, pageSize, offset))));
             case "#kill", "#kills" ->
-                    rows.addAll(formatEntityRows(source, orEmpty(mod.database().queryEntities(c, pageSize, offset)), 1));
+                    rows.addAll(formatEntityRows(source, orEmpty(mod.database().queryEntities(c, pageSize, offset))));
             case "#chat" ->
-                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryChat(c, pageSize, offset)), "chat", 1));
+                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryChat(c, pageSize, offset))));
             case "#command" ->
-                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryCommands(c, pageSize, offset)), "command", 1));
+                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryCommands(c, pageSize, offset))));
             case "#session", "+session", "-session" ->
-                    rows.addAll(formatSessionRows(source, orEmpty(mod.database().querySessions(c, pageSize, offset)), 1));
+                    rows.addAll(formatSessionRows(source, orEmpty(mod.database().querySessions(c, pageSize, offset))));
             default ->
-                    rows.addAll(formatBlockRows(source, orEmpty(mod.database().queryBlocks(c, pageSize, offset)), 1));
+                    rows.addAll(formatBlockRows(source, orEmpty(mod.database().queryBlocks(c, pageSize, offset))));
         }
 
         if (rows == null || rows.isEmpty()) {
             Messages.cmd(source, "coreprotect.lookup.empty");
             return 1;
         }
-        Messages.header(source, "coreprotect.lookup.header", c.page, rows.size());
-        for (String row : rows) {
-            Messages.send(source, Component.literal(row).withStyle(ChatFormatting.GRAY));
+        Messages.cmd(source, "coreprotect.lookup.rows_found", rows.size());
+        Messages.send(source, lookupHeader(source));
+        for (Component row : rows) {
+            Messages.send(source, row);
         }
         if (rows.size() >= pageSize) {
-            Messages.plain(source, "coreprotect.lookup.footer", c.page + 1);
+            Messages.footer(source, buildLookupCommand(c, c.page + 1), "coreprotect.lookup.footer", c.page + 1);
         }
         return 1;
+    }
+
+    /** Rebuilds the /co lookup command for the next page, carrying over all current filters. */
+    private static String buildLookupCommand(Criteria c, int page) {
+        StringBuilder sb = new StringBuilder("/co lookup");
+        if (c.user != null && !c.user.isEmpty()) sb.append(" u:").append(c.user);
+        long secondsAgo = TimeUtil.now() - c.time;
+        if (secondsAgo > 0) sb.append(" t:").append(secondsAgo);
+        if (c.action != null && !c.action.isEmpty() && !"block".equals(c.action)) sb.append(" a:").append(c.action);
+        if (c.radius > 0) sb.append(" r:").append(c.radius);
+        if (c.block != null && !c.block.isEmpty()) sb.append(" b:").append(c.block);
+        if (c.exclude != null && !c.exclude.isEmpty()) sb.append(" e:").append(c.exclude);
+        sb.append(" p:").append(page);
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------
     // Row formatters (public so inspection mode can reuse them)
     // ------------------------------------------------------------------
 
-    public static List<String> formatBlockRows(CommandSourceStack source, List<DatabaseManager.BlockLog> logs, int startIndex) {
-        List<String> rows = new ArrayList<>();
+    public static List<Component> formatBlockRows(CommandSourceStack source, List<DatabaseManager.BlockLog> logs) {
+        List<Component> rows = new ArrayList<>();
         Translator t = CoreProtectFabric.instance().translator();
         ServerPlayer p = source.getPlayer();
         long now = TimeUtil.now();
-        int i = startIndex;
         for (DatabaseManager.BlockLog l : logs) {
             String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
             String user = causeName(t, p, l.user());
             String verb = blockVerb(t, p, l);
-            String blockName = BlockStateUtil.displayName(blockIdFor(l));
+            String subject = BlockStateUtil.displayName(blockIdFor(l));
             String sign = signSuffix(l.meta());
             if (sign != null) {
-                rows.add(t.get(p, "coreprotect.row.sign", i, ago, user, verb, blockName, sign));
-            } else {
-                rows.add(t.get(p, "coreprotect.row.block", i, ago, user, verb, blockName));
+                subject = subject + " [" + sign + "]";
             }
-            i++;
+            boolean place = l.type() == DatabaseManager.TYPE_PLACE;
+            rows.add(row(ago, place ? ChatFormatting.GREEN : ChatFormatting.RED, place ? "+" : "-",
+                    user, verb, List.of(Component.literal(subject).withStyle(ChatFormatting.DARK_AQUA))));
         }
         return rows;
     }
 
-    public static List<String> formatContainerRows(CommandSourceStack source, List<DatabaseManager.ContainerLog> logs, int startIndex) {
-        List<String> rows = new ArrayList<>();
+    public static List<Component> formatContainerRows(CommandSourceStack source, List<DatabaseManager.ContainerLog> logs) {
+        List<Component> rows = new ArrayList<>();
         Translator t = CoreProtectFabric.instance().translator();
         ServerPlayer p = source.getPlayer();
         long now = TimeUtil.now();
-        int i = startIndex;
         for (DatabaseManager.ContainerLog l : logs) {
             String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
-            String verb = l.type() == DatabaseManager.CONTAINER_DEPOSIT
-                    ? t.get(p, "coreprotect.action.deposited")
-                    : t.get(p, "coreprotect.action.withdrew");
-            rows.add(t.get(p, "coreprotect.row.container", i, ago, l.user(), verb, l.amount(),
-                    BlockStateUtil.displayName(l.data())));
-            i++;
+            boolean deposit = l.type() == DatabaseManager.CONTAINER_DEPOSIT;
+            String verb = t.get(p, deposit ? "coreprotect.action.deposited" : "coreprotect.action.withdrew");
+            rows.add(row(ago, deposit ? ChatFormatting.GREEN : ChatFormatting.RED, deposit ? "+" : "-",
+                    causeName(t, p, l.user()), verb,
+                    List.of(Component.literal(l.amount() + "x ").withStyle(ChatFormatting.WHITE),
+                            Component.literal(BlockStateUtil.displayName(l.data())).withStyle(ChatFormatting.DARK_AQUA))));
         }
         return rows;
     }
 
-    public static List<String> formatEntityRows(CommandSourceStack source, List<DatabaseManager.EntityLog> logs, int startIndex) {
-        List<String> rows = new ArrayList<>();
+    public static List<Component> formatItemRows(CommandSourceStack source, List<DatabaseManager.ItemLog> logs) {
+        List<Component> rows = new ArrayList<>();
         Translator t = CoreProtectFabric.instance().translator();
         ServerPlayer p = source.getPlayer();
         long now = TimeUtil.now();
-        int i = startIndex;
+        for (DatabaseManager.ItemLog l : logs) {
+            String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
+            boolean pickup = "+".equals(l.action());
+            String verb = t.get(p, pickup ? "coreprotect.action.picked_up" : "coreprotect.action.dropped");
+            rows.add(row(ago, pickup ? ChatFormatting.GREEN : ChatFormatting.RED, pickup ? "+" : "-",
+                    causeName(t, p, l.user()), verb,
+                    List.of(Component.literal(l.amount() + "x ").withStyle(ChatFormatting.WHITE),
+                            Component.literal(BlockStateUtil.displayName(l.data())).withStyle(ChatFormatting.DARK_AQUA))));
+        }
+        return rows;
+    }
+
+    public static List<Component> formatSignRows(CommandSourceStack source, List<DatabaseManager.SignLog> logs) {
+        List<Component> rows = new ArrayList<>();
+        Translator t = CoreProtectFabric.instance().translator();
+        ServerPlayer p = source.getPlayer();
+        long now = TimeUtil.now();
+        for (DatabaseManager.SignLog l : logs) {
+            String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
+            String verb = t.get(p, "coreprotect.action.sign_edited");
+            rows.add(row(ago, ChatFormatting.WHITE, "-", causeName(t, p, l.user()), verb,
+                    List.of(Component.literal("[" + signLines(l.data()) + "]").withStyle(ChatFormatting.DARK_AQUA))));
+        }
+        return rows;
+    }
+
+    public static List<Component> formatEntityRows(CommandSourceStack source, List<DatabaseManager.EntityLog> logs) {
+        List<Component> rows = new ArrayList<>();
+        Translator t = CoreProtectFabric.instance().translator();
+        ServerPlayer p = source.getPlayer();
+        long now = TimeUtil.now();
         for (DatabaseManager.EntityLog l : logs) {
             String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
             String other = BlockStateUtil.displayName(l.data());
             if ("kill".equals(l.action())) {
-                rows.add(t.get(p, "coreprotect.row.kill", i, ago, l.user(), other));
+                rows.add(row(ago, ChatFormatting.WHITE, "-", causeName(t, p, l.user()),
+                        t.get(p, "coreprotect.action.killed"),
+                        List.of(Component.literal(other).withStyle(ChatFormatting.DARK_AQUA))));
             } else {
-                rows.add(t.get(p, "coreprotect.row.death", i, ago, l.user(), other));
+                rows.add(row(ago, ChatFormatting.RED, "-", causeName(t, p, l.user()),
+                        t.get(p, "coreprotect.action.killed_by"),
+                        List.of(Component.literal(other).withStyle(ChatFormatting.DARK_AQUA))));
             }
-            i++;
         }
         return rows;
     }
 
-    public static List<String> formatSessionRows(CommandSourceStack source, List<DatabaseManager.MessageLog> logs, int startIndex) {
-        List<String> rows = new ArrayList<>();
+    public static List<Component> formatSessionRows(CommandSourceStack source, List<DatabaseManager.MessageLog> logs) {
+        List<Component> rows = new ArrayList<>();
         Translator t = CoreProtectFabric.instance().translator();
         ServerPlayer p = source.getPlayer();
         long now = TimeUtil.now();
-        int i = startIndex;
         for (DatabaseManager.MessageLog l : logs) {
             String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
-            rows.add(t.get(p, "+".equals(l.action()) ? "coreprotect.row.session.join" : "coreprotect.row.session.leave",
-                    i, ago, l.user()));
-            i++;
+            rows.add(sessionRow(ago, t, p, l));
         }
         return rows;
     }
 
-    public static List<String> formatMessageRows(CommandSourceStack source, List<DatabaseManager.MessageLog> logs,
-                                                 String kind, int startIndex) {
-        List<String> rows = new ArrayList<>();
+    /** Session rows for /co online: absolute clock times instead of relative "ago" values. */
+    public static List<Component> formatOnlineRows(CommandSourceStack source, List<DatabaseManager.MessageLog> logs) {
+        List<Component> rows = new ArrayList<>();
+        Translator t = CoreProtectFabric.instance().translator();
+        ServerPlayer p = source.getPlayer();
+        for (DatabaseManager.MessageLog l : logs) {
+            rows.add(sessionRow(TimeUtil.clock(l.time()), t, p, l));
+        }
+        return rows;
+    }
+
+    public static List<Component> formatMessageRows(CommandSourceStack source, List<DatabaseManager.MessageLog> logs) {
+        List<Component> rows = new ArrayList<>();
         Translator t = CoreProtectFabric.instance().translator();
         ServerPlayer p = source.getPlayer();
         long now = TimeUtil.now();
-        int i = startIndex;
-        String key = "chat".equals(kind) ? "coreprotect.row.chat" : "coreprotect.row.command";
         for (DatabaseManager.MessageLog l : logs) {
             String ago = TimeUtil.ago(t, p, Math.max(0, now - l.time()));
-            rows.add(t.get(p, key, i, ago, l.user(), l.message()));
-            i++;
+            rows.add(colonRow(ago, causeName(t, p, l.user()), l.message()));
         }
         return rows;
+    }
+
+    // ------------------------------------------------------------------
+    // Row builders (CoreProtect v22+ color scheme)
+    // ------------------------------------------------------------------
+
+    /** {@code <gray>time</gray> <tag> <dark aqua>user</dark aqua> <white>verb</white> <subject segments>.} */
+    private static Component row(String time, ChatFormatting tagColor, String tag, String user, String verb, List<Component> subjects) {
+        MutableComponent text = Component.literal(time).withStyle(ChatFormatting.GRAY);
+        text.append(Component.literal(" ").withStyle(ChatFormatting.WHITE));
+        text.append(Component.literal(tag).withStyle(tagColor));
+        text.append(Component.literal(" ").withStyle(ChatFormatting.WHITE));
+        text.append(Component.literal(user).withStyle(ChatFormatting.DARK_AQUA));
+        text.append(Component.literal(" ").withStyle(ChatFormatting.WHITE));
+        text.append(Component.literal(verb).withStyle(ChatFormatting.WHITE));
+        for (Component subject : subjects) {
+            text.append(Component.literal(" ").withStyle(ChatFormatting.WHITE));
+            text.append(subject);
+        }
+        text.append(Component.literal(".").withStyle(ChatFormatting.WHITE));
+        return text;
+    }
+
+    private static Component sessionRow(String time, Translator t, ServerPlayer p, DatabaseManager.MessageLog l) {
+        boolean join = "+".equals(l.action());
+        return row(time, join ? ChatFormatting.GREEN : ChatFormatting.RED, join ? "+" : "-",
+                causeName(t, p, l.user()),
+                t.get(p, join ? "coreprotect.action.session_join" : "coreprotect.action.session_leave"),
+                List.of());
+    }
+
+    /** {@code <gray>time</gray> - <dark aqua>user</dark aqua>: <white>message</white>} (chat/command). */
+    private static Component colonRow(String time, String user, String message) {
+        return Component.literal(time).withStyle(ChatFormatting.GRAY)
+                .append(Component.literal(" ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("-").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(" ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(user).withStyle(ChatFormatting.DARK_AQUA))
+                .append(Component.literal(": ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(message).withStyle(ChatFormatting.WHITE));
+    }
+
+    /** {@code ----- <dark aqua>CoreProtect | Lookup Results</dark aqua> -----}, as in the plugin. */
+    private static Component lookupHeader(CommandSourceStack source) {
+        String title = Messages.translate(source, "coreprotect.lookup.header.title");
+        return Component.literal("----- ").withStyle(ChatFormatting.WHITE)
+                .append(Component.literal("CoreProtect").withStyle(ChatFormatting.DARK_AQUA))
+                .append(Component.literal(" | ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(title).withStyle(ChatFormatting.DARK_AQUA))
+                .append(Component.literal(" -----").withStyle(ChatFormatting.WHITE));
     }
 
     // ------------------------------------------------------------------
@@ -184,12 +289,13 @@ public final class LookupService {
     private static String blockVerb(Translator t, ServerPlayer p, DatabaseManager.BlockLog l) {
         if (l.type() == DatabaseManager.TYPE_PLACE) return t.get(p, "coreprotect.action.placed");
         if (l.type() == DatabaseManager.TYPE_BREAK) return t.get(p, "coreprotect.action.removed");
+        if ("minecraft:air".equals(l.oldData())) return t.get(p, "coreprotect.action.placed");
         if ("minecraft:air".equals(l.newData())) return t.get(p, "coreprotect.action.destroyed");
         return t.get(p, "coreprotect.action.changed");
     }
 
     private static String blockIdFor(DatabaseManager.BlockLog l) {
-        return l.type() == DatabaseManager.TYPE_PLACE ? l.newData() : l.oldData();
+        return "minecraft:air".equals(l.oldData()) ? l.newData() : l.oldData();
     }
 
     private static String causeName(Translator t, ServerPlayer p, String user) {
@@ -212,5 +318,10 @@ public final class LookupService {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static String signLines(String meta) {
+        String suffix = signSuffix(meta);
+        return suffix == null ? "" : suffix;
     }
 }

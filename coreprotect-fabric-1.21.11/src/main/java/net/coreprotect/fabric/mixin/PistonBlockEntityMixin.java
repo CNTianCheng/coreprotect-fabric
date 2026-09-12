@@ -1,5 +1,6 @@
 package net.coreprotect.fabric.mixin;
 
+import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.util.NaturalBreakCause;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.PistonBlockEntity;
@@ -10,7 +11,12 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** Attributes blocks moved by pistons to #piston. */
+/**
+ * Attributes blocks moved by pistons to #piston: the cause marker suppresses the
+ * mechanism noise (piston head / moving ghost states) while the tick runs, and the
+ * moved block is logged directly ("removed" at the source, "placed" at the destination)
+ * when the movement finishes.
+ */
 @Mixin(PistonBlockEntity.class)
 public abstract class PistonBlockEntityMixin {
 
@@ -26,5 +32,7 @@ public abstract class PistonBlockEntityMixin {
     private static void coreprotect$pistonEnd(World world, BlockPos pos, BlockState state, PistonBlockEntity blockEntity,
                                               CallbackInfo ci) {
         NaturalBreakCause.clear("#piston");
+        CoreProtectFabric.logPistonMove(world, pos, state, blockEntity);
     }
 }
+

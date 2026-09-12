@@ -1,0 +1,37 @@
+{
+  "description": "CoreProtect-style block/container logging, rollback, restore, lookup and inspection for Fabric servers. 多语言支持 (EN/简体中文/繁體中文/日本語).",
+  "targets": [
+    {
+      "name": "coreprotect-fabric-1.21.11",
+      "version": "1.21.11",
+      "extra_pairs": [],
+      "java_pairs": []
+    },
+    {
+      "name": "coreprotect-fabric-26.1.2",
+      "version": "26.1.2",
+      "extra_pairs": [],
+      "java_pairs": [
+        ["需要 **Java 21** 和 **Fabric Loader 0.16+**", "需要 **Java 25** 和 **Fabric Loader 0.19+**"],
+        ["# 需要 JDK 21", "# 需要 JDK 25"],
+        ["| 服务端 | Fabric Loader ≥ 0.16 + Fabric API |", "| 服务端 | Fabric Loader ≥ 0.19 + Fabric API |"],
+        ["| Server | Fabric Loader ≥ 0.16 + Fabric API |", "| Server | Fabric Loader ≥ 0.19 + Fabric API |"],
+        ["| Java | 21 |", "| Java | 25 |"]
+      ]
+    }
+  ],
+  "common_pairs": [
+    ["（Minecraft 1.21 版）", "（Minecraft @VER@ 版）"],
+    ["（Minecraft 1.21）：", "（Minecraft @VER@）："],
+    ["面向 Minecraft 1.21 Fabric 服务器", "面向 Minecraft @VER@ Fabric 服务器"],
+    ["for Minecraft 1.21 Fabric servers", "for Minecraft @VER@ Fabric servers"],
+    ["**Minecraft 1.21**", "**Minecraft @VER@**"],
+    ["本目录为 ", "本目录为 "]
+  ],
+  "line_pairs": [
+    ["；Minecraft 1.21.1 请使用 `coreprotect-fabric/` 目录构建的 `coreprotect-fabric-1.0.0.jar`。", "。"],
+    ["| Minecraft | **1.21**（1.21.1 请使用 `coreprotect-fabric/` 目录的对应构建） |", "| Minecraft | **@VER@** |"],
+    ["| Minecraft | **1.21** (for 1.21.1, use the matching build in the `coreprotect-fabric/` directory) |", "| Minecraft | **@VER@** |"],
+    ["coreprotect-fabric-1.21-1.8.1.jar", "coreprotect-fabric-@VER@-1.8.1.jar"]
+  ]
+}

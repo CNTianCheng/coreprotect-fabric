@@ -63,6 +63,18 @@ public final class BlockStateUtil {
         return any ? GSON.toJson(lines) : null;
     }
 
+    /** Serializes raw sign lines to JSON (same format as {@link #signTextToJson}), or {@code null} when blank. */
+    public static String signLinesToJson(String[] rawLines) {
+        if (rawLines == null) return null;
+        List<String> lines = new ArrayList<>();
+        boolean any = false;
+        for (String line : rawLines) {
+            lines.add(line == null ? "" : line);
+            if (line != null && !line.isBlank()) any = true;
+        }
+        return any ? GSON.toJson(lines) : null;
+    }
+
     /** Restores sign front text from a JSON meta string. */
     public static void applySignText(ServerWorld world, BlockPos pos, String meta) {
         if (meta == null || meta.isBlank()) return;
@@ -81,4 +93,3 @@ public final class BlockStateUtil {
         }
     }
 }
-

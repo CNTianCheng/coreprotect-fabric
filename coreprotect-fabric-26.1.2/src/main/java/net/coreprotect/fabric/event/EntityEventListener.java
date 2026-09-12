@@ -4,12 +4,12 @@ import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
 
 /**
  * Logs entity kills and player deaths (CoreProtect co_entity). Only events

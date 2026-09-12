@@ -16,7 +16,12 @@
     "EndermanPlaceMixin",
     "PistonBlockEntityMixin",
     "ServerPlayerEntityMixin",
-    "ServerPlayNetworkHandlerMixin"
+    "ServerPlayNetworkHandlerMixin",
+    "HopperBlockEntityMixin",
+    "DispenserBlockMixin",
+    "DropperBlockMixin",
+    "PlayerEntityDropMixin",
+    "ItemEntityPickupMixin"
   ],
   "client": []
 }

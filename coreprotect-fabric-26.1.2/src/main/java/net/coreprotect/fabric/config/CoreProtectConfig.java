@@ -17,13 +17,18 @@ public final class CoreProtectConfig {
 
     /** Fallback language when a player has no override and their client locale is unknown. */
     public String language = "en_us";
-    /** SQLite file name, resolved relative to the game directory. */
+    /** SQLite file name/path: relative paths resolve against the game directory, absolute paths are used as-is. */
     public String databaseFile = "coreprotect.db";
 
     public Logging logging = new Logging();
     public Lookup lookup = new Lookup();
     public Rollback rollback = new Rollback();
     public Permissions permissions = new Permissions();
+    public PermissionGroups permissionGroups = new PermissionGroups();
+    public DataRetention dataRetention = new DataRetention();
+    public Metrics metrics = new Metrics();
+    public UpdateCheck updateCheck = new UpdateCheck();
+    public Database database = new Database();
 
     public static class Logging {
         public boolean block = true;
@@ -33,6 +38,10 @@ public final class CoreProtectConfig {
         public boolean command = true;
         public boolean session = true;
         public boolean natural = true;
+        public boolean hopper = true;
+        public boolean dispenser = true;
+        public boolean item = true;
+        public boolean signEdit = true;
     }
 
     public static class Lookup {
@@ -56,7 +65,79 @@ public final class CoreProtectConfig {
         public int adminLevel = 4;
     }
 
+    /**
+     * CoreProtect-style permission groups: when enabled, players listed in a group
+     * gain the nodes in that group's {@code permissions} list (or {@code "all"}).
+     * Works together with the OP-level fallback above.
+     */
+    public static class PermissionGroups {
+        public boolean enabled = false;
+        public java.util.LinkedHashMap<String, Group> groups = new java.util.LinkedHashMap<>();
+
+        public static class Group {
+            public java.util.List<String> players = new java.util.ArrayList<>();
+            public java.util.List<String> permissions = new java.util.ArrayList<>();
+        }
+
+        public PermissionGroups() {
+            Group admin = new Group();
+            admin.permissions.add("all");
+            groups.put("admin", admin);
+        }
+    }
+
+    /**
+     * Automatic data-retention limit: when enabled, rows older than {@code maxDays}
+     * days are deleted once at server startup (after the database is opened).
+     */
+    public static class DataRetention {
+        public boolean enabled = false;
+        /** Maximum data age in days; rows older than this are pruned at startup. */
+        public int maxDays = 30;
+    }
+
+    /**
+     * bStats usage statistics (https://bstats.org). Anonymous data is submitted
+     * every 30 minutes; players can opt out via {@code config/bstats/config.txt}.
+     */
+    public static class Metrics {
+        public boolean enabled = true;
+        /** bStats service id, assigned when the mod was registered at bstats.org. 0 disables submission. */
+        public int serviceId = 33739;
+        /** bStats API endpoint. Custom endpoints use a short submit delay (for self-hosting/testing). */
+        public String endpoint = "https://bstats.org/api/v2/data/server-implementation";
+    }
+
+    /**
+     * Update notifications: checks Modrinth (or a custom URL) for newer releases and
+     * notifies the server console and admin players.
+     */
+    /** Database tuning. */
+    public static class Database {
+        /** SQLite page cache per connection, in MB (larger = faster reads, more RAM). */
+        public int cacheSizeMB = 128;
+        /** WAL durability: "full" fsyncs every commit (max crash safety, default); "normal" is faster. */
+        public String syncMode = "full";
+        /** How often the WAL is checkpointed in the background, in minutes (smaller WAL = faster crash recovery). */
+        public int checkpointMinutes = 10;
+        /** How often a hot backup (VACUUM INTO) is written to <db>.backup, in minutes (0 = disabled). */
+        public int backupMinutes = 360;
+        /** When integrity checking finds a corrupt database, restore it from <db>.backup automatically. */
+        public boolean autoRestoreBackup = true;
+    }
+
+    public static class UpdateCheck {
+        public boolean enabled = true;
+        /** Modrinth project slug. */
+        public String slug = "coreprotect-fabric";
+        /** Optional override: a custom JSON API URL returning a Modrinth-style version list. */
+        public String url = "";
+        /** How often to re-check for updates, in hours. */
+        public int intervalHours = 12;
+    }
+
     private transient Path path;
+    private transient boolean endpointMigrated;
 
     public Path path() {
         if (path == null) {
@@ -73,21 +154,61 @@ public final class CoreProtectConfig {
                 return;
             }
             String json = Files.readString(p);
+            // Older config files have no "dispenser" key in logging; keep it enabled for them.
+            boolean hasDispenserKey = true;
+            try {
+                com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+                if (root.has("logging") && root.get("logging").isJsonObject()) {
+                    hasDispenserKey = root.getAsJsonObject("logging").has("dispenser");
+                }
+            } catch (Exception ignored) {
+            }
             CoreProtectConfig loaded = GSON.fromJson(json, CoreProtectConfig.class);
             if (loaded == null) return;
             // merge top-level fields, keeping nested defaults for missing sections
             this.language = loaded.language;
             this.databaseFile = loaded.databaseFile;
-            if (loaded.logging != null) this.logging = loaded.logging;
+            if (loaded.logging != null) {
+                this.logging = loaded.logging;
+                if (!hasDispenserKey) this.logging.dispenser = true;
+            }
             if (loaded.lookup != null) this.lookup = loaded.lookup;
             if (loaded.rollback != null) this.rollback = loaded.rollback;
             if (loaded.permissions != null) this.permissions = loaded.permissions;
+            if (loaded.permissionGroups != null) this.permissionGroups = loaded.permissionGroups;
+            if (loaded.dataRetention != null) this.dataRetention = loaded.dataRetention;
+            if (loaded.metrics != null) this.metrics = loaded.metrics;
+            if (loaded.updateCheck != null) this.updateCheck = loaded.updateCheck;
+            if (loaded.database != null) this.database = loaded.database;
+            if (this.database.cacheSizeMB < 16) this.database.cacheSizeMB = 128;
+            if (!"normal".equalsIgnoreCase(this.database.syncMode)) this.database.syncMode = "full";
+            if (this.database.checkpointMinutes < 1) this.database.checkpointMinutes = 10;
+            if (this.database.backupMinutes < 0) this.database.backupMinutes = 360;
+            if (this.permissionGroups.groups == null) this.permissionGroups.groups = new java.util.LinkedHashMap<>();
             if (this.lookup.maxLines < 1) this.lookup.maxLines = 10;
             if (this.lookup.inspectLines < 1) this.lookup.inspectLines = 8;
             if (this.lookup.defaultTimeSeconds < 0) this.lookup.defaultTimeSeconds = 604800;
             if (this.rollback.maxBlocks < 1) this.rollback.maxBlocks = 5000;
+            if (this.dataRetention.maxDays < 1) this.dataRetention.maxDays = 30;
+            if (this.metrics.serviceId < 0) this.metrics.serviceId = 0;
+            if (this.metrics.endpoint == null || this.metrics.endpoint.isBlank()
+                    || this.metrics.endpoint.contains("/api/v2/data/fabric")) {
+                // "fabric" is not a valid bStats platform; the service is registered under
+                // "server-implementation" (the platform for server-side mods).
+                this.metrics.endpoint = "https://bstats.org/api/v2/data/server-implementation";
+                endpointMigrated = true;
+            }
+            if (this.updateCheck.slug == null || this.updateCheck.slug.isBlank()) {
+                this.updateCheck.slug = "coreprotect-fabric";
+            }
+            if (this.updateCheck.intervalHours < 1) this.updateCheck.intervalHours = 12;
+            if (this.databaseFile == null || this.databaseFile.isBlank()) this.databaseFile = "coreprotect.db";
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to load config, using defaults", e);
+        }
+        if (endpointMigrated) {
+            endpointMigrated = false;
+            save(); // persist corrections (e.g. the bStats endpoint fix) back to disk
         }
     }
 

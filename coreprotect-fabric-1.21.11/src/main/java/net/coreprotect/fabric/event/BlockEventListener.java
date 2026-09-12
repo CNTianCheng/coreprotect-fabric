@@ -78,8 +78,14 @@ public final class BlockEventListener {
 
         if (mod.inspector().isInspecting(sp)) {
             ItemStack stack = sp.getStackInHand(hand);
-            if (stack.getItem() instanceof BlockItem) {
-                return ActionResult.PASS; // allow placement; the deferred check performs a block lookup
+            if (world.getBlockState(hit.getBlockPos()).isAir()) {
+                // Clicking air: nothing to inspect and no block-type lookup (matches CoreProtect).
+                return ActionResult.PASS;
+            }
+            if (stack.getItem() instanceof BlockItem item) {
+                // CoreProtect behavior: cancel the placement and run a lookup for the held block type instead
+                mod.inspector().lookupForBlock(sp, item.getBlock());
+                return ActionResult.FAIL;
             }
             mod.inspector().showAdjacentHistory(sp, world, hit);
             return ActionResult.FAIL;

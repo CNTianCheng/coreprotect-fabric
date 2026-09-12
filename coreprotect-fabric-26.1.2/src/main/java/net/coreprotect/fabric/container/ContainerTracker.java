@@ -11,13 +11,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.TimeUtil;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
 
 /**
  * Tracks container interactions CoreProtect-style: when a player opens a

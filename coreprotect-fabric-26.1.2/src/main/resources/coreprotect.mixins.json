@@ -2,7 +2,7 @@
   "required": true,
   "minVersion": "0.8",
   "package": "net.coreprotect.fabric.mixin",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_25",
   "injectors": {
     "defaultRequire": 0
   },
@@ -16,7 +16,12 @@
     "EndermanPlaceMixin",
     "PistonBlockEntityMixin",
     "ServerPlayerEntityMixin",
-    "ServerPlayNetworkHandlerMixin"
+    "ServerPlayNetworkHandlerMixin",
+    "HopperBlockEntityMixin",
+    "DispenserBlockMixin",
+    "DropperBlockMixin",
+    "PlayerEntityDropMixin",
+    "ItemEntityPickupMixin"
   ],
   "client": []
 }

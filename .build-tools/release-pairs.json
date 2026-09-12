@@ -1,0 +1,27 @@
+{
+  "note_en": "> **This build brings Minecraft @VER@ to full feature parity with the 1.21 flagship build (v1.8.1)**: identical commands, logging coverage, colors, database schema v2 with crash/power-loss protection, bStats metrics and update checks.",
+  "note_zh": "> **本构建使 Minecraft @VER@ 与 1.21 旗舰版 v1.8.1 功能完全一致**：命令、记录范围、输出配色、v2 数据库结构与崩溃/断电防护、bStats 统计和更新检查全部相同。",
+  "anchor_en": "## English",
+  "anchor_zh": "## 中文",
+  "targets": [
+    {
+      "version": "1.21.11",
+      "java": "21",
+      "loader": "0.16"
+    },
+    {
+      "version": "26.1.2",
+      "java": "25",
+      "loader": "0.19"
+    }
+  ],
+  "pairs": [
+    ["# CoreProtect Fabric v1.8.1 (Minecraft 1.21 · Flagship)", "# CoreProtect Fabric v1.8.1 (Minecraft @VER@)"],
+    ["**Minecraft 1.21 flagship build**", "**Minecraft @VER@ build**"],
+    ["Requirements: Minecraft **1.21**, Java **21**, Fabric Loader >= 0.16 + Fabric API", "Requirements: Minecraft **@VER@**, Java **@JAVA@**, Fabric Loader >= @LOADER@ + Fabric API"],
+    ["要求：Minecraft **1.21**、Java **21**、Fabric Loader ≥ 0.16 + Fabric API", "要求：Minecraft **@VER@**、Java **@JAVA@**、Fabric Loader ≥ @LOADER@ + Fabric API"],
+    ["coreprotect-fabric-1.21-1.8.1.jar", "coreprotect-fabric-@VER@-1.8.1.jar"],
+    ["Drop `coreprotect-fabric-1.21-1.8.1.jar`", "Drop `coreprotect-fabric-@VER@-1.8.1.jar`"],
+    ["将 `coreprotect-fabric-1.21-1.8.1.jar`", "将 `coreprotect-fabric-@VER@-1.8.1.jar`"]
+  ]
+}

@@ -24,6 +24,15 @@ public final class ParamParser {
     }
 
     public static ParseResult parse(String raw, boolean defaultTime) {
+        return parse(raw, defaultTime, false);
+    }
+
+    /**
+     * Same as {@link #parse(String, boolean)}, but when {@code bareAsUser} is set a
+     * colon-less token is treated as the player name (used by /co online) instead of
+     * a page number; numeric bare tokens still count as pages.
+     */
+    public static ParseResult parse(String raw, boolean defaultTime, boolean bareAsUser) {
         Criteria c = new Criteria();
         c.time = defaultTime
                 ? TimeUtil.now() - CoreProtectFabric.instance().config().lookup.defaultTimeSeconds
@@ -38,6 +47,10 @@ public final class ParamParser {
                 int idx = token.indexOf(':');
                 if (idx <= 0) {
                     Integer page = parseInt(token);
+                    if (bareAsUser && page == null) {
+                        c.user = token;
+                        continue;
+                    }
                     if (page == null) return ParseResult.error("coreprotect.error.invalid_param", token);
                     c.page = page;
                     continue;

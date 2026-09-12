@@ -1,11 +1,14 @@
 package net.coreprotect.fabric.event;
 
 import net.coreprotect.fabric.CoreProtectFabric;
+import net.coreprotect.fabric.util.Messages;
+import net.coreprotect.fabric.util.Permissions;
 import net.coreprotect.fabric.util.TimeUtil;
+import net.coreprotect.fabric.util.UpdateChecker;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.network.ServerPlayerEntity;
 
-/** Logs player sessions (join/leave) and restores per-player language overrides. */
+/** Logs player sessions (join/leave), restores per-player language overrides, and notifies admins of updates. */
 public final class SessionEventListener {
 
     private SessionEventListener() {
@@ -24,6 +27,13 @@ public final class SessionEventListener {
             if (mod.config().logging.session) {
                 mod.database().insertSessionAsync(TimeUtil.now(), name,
                         player.getEntityWorld().getRegistryKey().getValue().toString(), "+");
+            }
+            // New-version notice for admin players (level >= adminLevel).
+            UpdateChecker checker = mod.updateChecker();
+            if (checker != null && checker.available()
+                    && Permissions.hasLevel(player.getCommandSource(), mod.config().permissions.adminLevel)) {
+                server.execute(() -> Messages.cmd(player.getCommandSource(), "coreprotect.update.available",
+                        checker.latestVersion(), CoreProtectFabric.MOD_VERSION, checker.latestUrl()));
             }
         });
 

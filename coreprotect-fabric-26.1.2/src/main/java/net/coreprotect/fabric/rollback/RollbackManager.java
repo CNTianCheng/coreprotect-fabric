@@ -12,24 +12,23 @@ import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.Criteria;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.BlockStateUtil;
-import net.minecraft.commands.CommandSourceStack;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.core.registries.Registries;
-import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.Identifier;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Container;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.Container;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.resources.Identifier;
+import net.minecraft.core.BlockPos;
 
 /**
  * Rollback / restore / undo engine, mirroring CoreProtect's semantics:
@@ -111,7 +110,7 @@ public final class RollbackManager {
                 continue;
             }
             if (target.isAir()) {
-                dropInventoryContents(world, pos);
+                dropContainerContents(world, pos);
             }
             world.setBlock(pos, target, Block.UPDATE_ALL);
             BlockStateUtil.applySignText(world, pos, l.meta());
@@ -182,7 +181,7 @@ public final class RollbackManager {
             if (slot.isEmpty()) {
                 inv.setItem(i, remaining.copy());
                 remaining.setCount(0);
-            } else if (ItemStack.isSameItemSameComponents(slot, remaining) && slot.getCount() < slot.getMaxStackSize()) {
+            } else if (ItemStack.isSameItem(slot, remaining) && slot.getCount() < slot.getMaxStackSize()) {
                 int move = Math.min(remaining.getCount(), slot.getMaxStackSize() - slot.getCount());
                 slot.grow(move);
                 remaining.shrink(move);
@@ -198,7 +197,7 @@ public final class RollbackManager {
         int remaining = amount;
         for (int i = 0; i < inv.getContainerSize() && remaining > 0; i++) {
             ItemStack slot = inv.getItem(i);
-            if (slot.is(item)) {
+            if (slot.getItem() == item) {
                 int take = Math.min(slot.getCount(), remaining);
                 ItemStack taken = slot.split(take);
                 remaining -= take;
@@ -221,7 +220,7 @@ public final class RollbackManager {
     }
 
     /** Drops a container's remaining contents before the container block is removed. */
-    private static void dropInventoryContents(ServerLevel world, BlockPos pos) {
+    private static void dropContainerContents(ServerLevel world, BlockPos pos) {
         BlockEntity be = world.getBlockEntity(pos);
         if (!(be instanceof Container inv)) return;
         for (int i = 0; i < inv.getContainerSize(); i++) {

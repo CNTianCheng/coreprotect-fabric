@@ -47,32 +47,33 @@ public final class TimeUtil {
         return any ? total : null;
     }
 
-    /** Compact "X ago" display, e.g. "3d ago", using the player's language. */
+    /**
+     * Plugin-style "X ago" display, e.g. "3.00 minutes ago" / "2.00 hours ago" /
+     * "5.00 days ago", using the player's language.
+     */
     public static String ago(Translator t, ServerPlayer player, long secondsAgo) {
-        long v;
+        double minutes = secondsAgo / 60.0;
+        double value;
         String unit;
-        if (secondsAgo >= 604800) {
-            v = secondsAgo / 604800;
-            unit = "w";
-        } else if (secondsAgo >= 86400) {
-            v = secondsAgo / 86400;
-            unit = "d";
-        } else if (secondsAgo >= 3600) {
-            v = secondsAgo / 3600;
-            unit = "h";
-        } else if (secondsAgo >= 60) {
-            v = secondsAgo / 60;
-            unit = "m";
+        if (minutes < 60) {
+            value = minutes;
+            unit = t.get(player, "coreprotect.time.minutes");
         } else {
-            v = Math.max(secondsAgo, 0);
-            unit = "s";
+            double hours = minutes / 60;
+            if (hours < 24) {
+                value = hours;
+                unit = t.get(player, "coreprotect.time.hours");
+            } else {
+                value = hours / 24;
+                unit = t.get(player, "coreprotect.time.days");
+            }
         }
-        return t.get(player, "coreprotect.time.ago", v + t.get(player, "coreprotect.time." + unit));
+        return t.get(player, "coreprotect.time.ago",
+                new java.text.DecimalFormat("0.00").format(value) + unit);
     }
 
     /** Multi-unit duration display, e.g. "2w 5d 10h 30m 15s". */
-    public static String formatDuration(Translator t, ServerPlayer player, long seconds) {
-        long w = seconds / 604800;
+    public static String formatDuration(Translator t, ServerPlayer player, long seconds) {        long w = seconds / 604800;
         long d = (seconds % 604800) / 86400;
         long h = (seconds % 86400) / 3600;
         long m = (seconds % 3600) / 60;
@@ -91,5 +92,11 @@ public final class TimeUtil {
             if (sb.length() > 0) sb.append(' ');
             sb.append(value).append(unit);
         }
+    }
+
+    /** Absolute "yyyy-MM-dd HH:mm:ss" display of an epoch-seconds timestamp (server time zone). */
+    public static String clock(long epochSeconds) {
+        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                .format(new java.util.Date(epochSeconds * 1000L));
     }
 }

@@ -5,17 +5,17 @@ import java.util.List;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
-import net.minecraft.commands.arguments.blocks.BlockStateParser;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.Registries;
-import net.minecraft.network.chat.Component;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.SignBlockEntity;
 import net.minecraft.world.level.block.entity.SignText;
-import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.commands.arguments.blocks.BlockStateParser;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.network.chat.Component;
+import net.minecraft.core.BlockPos;
 
 public final class BlockStateUtil {
     private static final Gson GSON = new Gson();
@@ -59,6 +59,18 @@ public final class BlockStateUtil {
             String line = sign.getFrontText().getMessage(i, false).getString();
             lines.add(line);
             if (!line.isBlank()) any = true;
+        }
+        return any ? GSON.toJson(lines) : null;
+    }
+
+    /** Serializes raw sign lines to JSON (same format as {@link #signTextToJson}), or {@code null} when blank. */
+    public static String signLinesToJson(String[] rawLines) {
+        if (rawLines == null) return null;
+        List<String> lines = new ArrayList<>();
+        boolean any = false;
+        for (String line : rawLines) {
+            lines.add(line == null ? "" : line);
+            if (line != null && !line.isBlank()) any = true;
         }
         return any ? GSON.toJson(lines) : null;
     }

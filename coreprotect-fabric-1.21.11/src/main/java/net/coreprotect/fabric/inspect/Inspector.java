@@ -20,7 +20,6 @@ import net.minecraft.registry.Registries;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -46,6 +45,16 @@ public final class Inspector {
         return true;
     }
 
+    /** Enables inspection (idempotent). */
+    public void enable(ServerPlayerEntity player) {
+        active.add(player.getUuid());
+    }
+
+    /** Disables inspection (idempotent). */
+    public void disable(ServerPlayerEntity player) {
+        active.remove(player.getUuid());
+    }
+
     public void showBlockHistory(ServerPlayerEntity player, World world, BlockPos pos) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
@@ -55,21 +64,29 @@ public final class Inspector {
         List<DatabaseManager.BlockLog> blocks = mod.database().queryBlockHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
         List<DatabaseManager.ContainerLog> containers =
                 mod.database().queryContainerHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
+        List<DatabaseManager.SignLog> signs =
+                mod.database().querySignHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
         BlockState current = world.getBlockState(pos);
-        Messages.header(source, "coreprotect.inspect.block.header",
+        Messages.coreHeader(source, "coreprotect.inspect.block.coords",
                 pos.getX(), pos.getY(), pos.getZ(),
                 BlockStateUtil.displayName(BlockStateUtil.stringify(current)));
         if (blocks == null || blocks.isEmpty()) {
-            Messages.plain(source, "coreprotect.inspect.block.empty");
+            Messages.cmd(source, "coreprotect.inspect.block.empty");
         } else {
-            for (String row : LookupService.formatBlockRows(source, blocks, 1)) {
-                Messages.send(source, Text.literal(row).formatted(Formatting.GRAY));
+            for (Text row : LookupService.formatBlockRows(source, blocks)) {
+                Messages.send(source, row);
             }
         }
         if (containers != null && !containers.isEmpty()) {
-            Messages.header(source, "coreprotect.inspect.container.header", pos.getX(), pos.getY(), pos.getZ());
-            for (String row : LookupService.formatContainerRows(source, containers, 1)) {
-                Messages.send(source, Text.literal(row).formatted(Formatting.GRAY));
+            Messages.title(source, "coreprotect.inspect.container.header", pos.getX(), pos.getY(), pos.getZ());
+            for (Text row : LookupService.formatContainerRows(source, containers)) {
+                Messages.send(source, row);
+            }
+        }
+        if (signs != null && !signs.isEmpty()) {
+            Messages.title(source, "coreprotect.inspect.sign.header", pos.getX(), pos.getY(), pos.getZ());
+            for (Text row : LookupService.formatSignRows(source, signs)) {
+                Messages.send(source, row);
             }
         }
     }
