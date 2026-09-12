@@ -22,12 +22,14 @@
 
 | Minecraft | 模组版本 | 工程目录 | Java |
 |---|---|---|---|
-| **1.21（旗舰）** | **1.7.2** | [`coreprotect-fabric-1.21/`](./coreprotect-fabric-1.21) | 21 |
+| **1.21（旗舰）** | **1.8.1** | [`coreprotect-fabric-1.21/`](./coreprotect-fabric-1.21) | 21 |
 | 1.21.1 | 1.0.0 | [`coreprotect-fabric/`](./coreprotect-fabric) | 21 |
-| 1.21.2 ~ 1.21.11 | 1.0.0 | `coreprotect-fabric-1.21.x/` | 21 |
-| 26.1 / 26.1.1 / 26.1.2 / 26.2 | 1.0.0 | `coreprotect-fabric-26.x/` | 25 |
+| 1.21.2 ~ 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.x/` | 21 |
+| **1.21.11** | **1.8.1** | [`coreprotect-fabric-1.21.11/`](./coreprotect-fabric-1.21.11) | 21 |
+| 26.1 / 26.1.1 / 26.2 | 1.0.0 | `coreprotect-fabric-26.x/` | 25 |
+| **26.1.2** | **1.8.1** | [`coreprotect-fabric-26.1.2/`](./coreprotect-fabric-26.1.2) | 25 |
 
-> 1.21 版持续迭代（旗舰功能），其余版本为核心功能集；1.21.2~1.21.11 使用 yarn 映射，26.x 使用 mojmap。所有构建要求 **Fabric Loader ≥ 0.16 + Fabric API**。
+> **1.21、1.21.11、26.1.2 为 v1.8.1 完整功能版**（功能一致）；其余版本为核心功能集 v1.0.0。1.21.2~1.21.11 使用 yarn 映射，26.x 使用 mojmap。所有构建要求 **Fabric Loader ≥ 0.16 + Fabric API**。
 
 ## 📥 安装
 

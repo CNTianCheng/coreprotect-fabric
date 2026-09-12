@@ -1,7 +1,16 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$cred = "protocol=https`nhost=github.com`n" | git credential fill 2>$null
-$token = ($cred | Select-String '^password=').ToString().Substring(9)
+# ask git for the stored github.com credential (works without gh CLI)
+$inFile = Join-Path $env:TEMP 'ghcred-in.txt'
+$outFile = Join-Path $env:TEMP 'ghcred-out.txt'
+$errFile = Join-Path $env:TEMP 'ghcred-err.txt'
+[System.IO.File]::WriteAllText($inFile, "protocol=https`nhost=github.com`n`n", [System.Text.Encoding]::ASCII)
+Start-Process -FilePath 'git' -ArgumentList 'credential', 'fill' -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -Wait
+$cred = [System.IO.File]::ReadAllText($outFile)
+Remove-Item $inFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+$token = ($cred -split "`n" | Where-Object { $_ -like 'password=*' } | Select-Object -First 1)
+if (-not $token) { throw 'no github credential available from git credential fill' }
+$token = $token.Substring(9).Trim()
 $headers = @{ 'Authorization' = "Bearer $token"; 'User-Agent' = 'coreprotect-release' }
 $repo = 'CNTianCheng/coreprotect-fabric'
 

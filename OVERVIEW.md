@@ -83,13 +83,13 @@
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.0.0 | `coreprotect-fabric-1.21.11-1.0.0.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.8.1 | `coreprotect-fabric-1.21.11-1.8.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.0.0 | `coreprotect-fabric-26.1.2-1.0.0.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.8.1 | `coreprotect-fabric-26.1.2-1.8.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。除 1.21 旗舰版外，其余版本为 v1.0.0 核心功能集；各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
+> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。**1.21、1.21.11、26.1.2 均为 v1.8.1 完整功能版**（命令、记录范围、配色、数据库结构与崩溃/断电防护完全一致）；其余版本为 v1.0.0 核心功能集。各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
 
 ## 安装
 

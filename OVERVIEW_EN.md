@@ -83,13 +83,13 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.0.0 | `coreprotect-fabric-1.21.11-1.0.0.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.8.1 | `coreprotect-fabric-1.21.11-1.8.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.0.0 | `coreprotect-fabric-26.1.2-1.0.0.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.8.1 | `coreprotect-fabric-26.1.2-1.8.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. Except for the 1.21 flagship, all builds carry the v1.0.0 core feature set; each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
+> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. **1.21, 1.21.11 and 26.1.2 all ship the complete v1.8.1 feature set** (identical commands, logging coverage, colors, database schema and crash/power-loss protection); the remaining builds carry the v1.0.0 core feature set. Each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
 
 ## Installation
 
