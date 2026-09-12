@@ -12,6 +12,9 @@ Invoke-RestMethod -Uri "https://api.github.com/repos/CNTianCheng/coreprotect-fab
 Write-Output 'v1.7.2 body updated (bilingual)'
 
 $template = [System.IO.File]::ReadAllText("$PSScriptRoot\release-v100-template.md", [System.Text.Encoding]::UTF8)
+# non-ASCII text must come from UTF-8 data files: Windows PowerShell reads .ps1 as ANSI
+$noteEn = ([System.IO.File]::ReadAllText("$PSScriptRoot\repair\note-en.txt", [System.Text.Encoding]::UTF8)).Trim()
+$noteZh = ([System.IO.File]::ReadAllText("$PSScriptRoot\repair\note-zh.txt", [System.Text.Encoding]::UTF8)).Trim()
 $versions = @(
     @{ mc = '1.21.1';  tag = 'v1.0.0-mc1.21.1';  java = '21'; mojmap = $false },
     @{ mc = '1.21.2';  tag = 'v1.0.0-mc1.21.2';  java = '21'; mojmap = $false },
@@ -36,7 +39,7 @@ foreach ($v in $versions) {
     $jarName = $rel.assets[0].name
     $body = $template.Replace('{mc}', $v.mc).Replace('{java}', $v.java).Replace('{jar}', $jarName)
     if ($v.mojmap) {
-        $body = $body.Replace('{mapping_note_en}', '; uses official mojmap mappings').Replace('{mapping_note_zh}', '；使用官方 mojmap 映射')
+        $body = $body.Replace('{mapping_note_en}', $noteEn).Replace('{mapping_note_zh}', $noteZh)
     } else {
         $body = $body.Replace('{mapping_note_en}', '').Replace('{mapping_note_zh}', '')
     }

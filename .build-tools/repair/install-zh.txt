@@ -1,0 +1,1 @@
+- 要求：Minecraft **@MC@**、Java **@JAVA@**、Fabric Loader ≥ 0.16 + Fabric API@NOTE@

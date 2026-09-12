@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+# non-ASCII text lives in UTF-8 data files: Windows PowerShell reads .ps1 files as ANSI
+$supersededText = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'repair\superseded.txt'), [System.Text.Encoding]::UTF8)).TrimEnd("`r", "`n")
 # ask git for the stored github.com credential (works without gh CLI)
 $inFile = Join-Path $env:TEMP 'ghcred-in.txt'
 $outFile = Join-Path $env:TEMP 'ghcred-out.txt'
@@ -51,7 +53,7 @@ foreach ($t in $targets) {
     # point the previous release at this one
     try {
         $prevRel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$($t.prev)" -Headers $headers
-        $prefix = "> [!IMPORTANT]`n> Superseded by **$($t.tag)** (v1.8.2), which fixes a set of logging, rollback and database-safety bugs. Please use the newer release.`n> 已被 **$($t.tag)**（v1.8.2）取代，修复了记录、回滚与数据库安全方面的一批缺陷，请使用新版本。`n`n"
+        $prefix = $supersededText.Replace('@TAG@', $t.tag) + "`n`n"
         if ($prevRel.body -notlike "*$($t.tag)*") {
             $patch = @{ body = $prefix + $prevRel.body } | ConvertTo-Json -Depth 4
             Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($prevRel.id)" -Headers $headers -Method Patch -Body ([System.Text.Encoding]::UTF8.GetBytes($patch)) -ContentType 'application/json; charset=utf-8' | Out-Null

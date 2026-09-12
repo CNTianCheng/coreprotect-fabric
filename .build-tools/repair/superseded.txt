@@ -1,0 +1,3 @@
+> [!IMPORTANT]
+> Superseded by **@TAG@**. Please use the newer release.
+> 该构建已被 **@TAG@** 取代，请使用新版本。
