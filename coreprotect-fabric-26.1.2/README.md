@@ -35,7 +35,7 @@
 ## 📥 安装
 
 1. 需要 **Java 25** 和 **Fabric Loader 0.19+**（服务端），并安装 **Fabric API**。
-2. 将 `coreprotect-fabric-26.1.2-1.8.1.jar` 放入服务端 `mods/` 文件夹。
+2. 将 `coreprotect-fabric-26.1.2-1.8.2.jar` 放入服务端 `mods/` 文件夹。
 3. 启动服务器。数据库默认创建在游戏目录下的 `coreprotect.db`，配置在 `config/coreprotect-fabric.json`。
 
 ## 🛠 自行构建
@@ -43,7 +43,7 @@
 ```bash
 # 需要 JDK 25
 ./gradlew build
-# 产物位于 build/libs/coreprotect-fabric-26.1.2-1.8.1.jar
+# 产物位于 build/libs/coreprotect-fabric-26.1.2-1.8.2.jar
 ```
 
 ## 🎮 命令

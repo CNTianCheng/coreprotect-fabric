@@ -137,7 +137,10 @@ public final class Translator {
     private static String format(String pattern, Object... args) {
         if (args == null || args.length == 0) return pattern;
         try {
-            return MessageFormat.format(pattern, args);
+            // MessageFormat treats ' as a quoting character: an apostrophe in a translation
+            // (or a name/message inserted into one) would throw and lose the placeholders,
+            // so every quote is escaped first
+            return MessageFormat.format(pattern.replace("'", "''"), args);
         } catch (IllegalArgumentException e) {
             return pattern;
         }

@@ -63,8 +63,12 @@ public final class BlockStateUtil {
         return any ? GSON.toJson(lines) : null;
     }
 
-    /** Serializes raw sign lines to JSON (same format as {@link #signTextToJson}), or {@code null} when blank. */
-    public static String signLinesToJson(String[] rawLines) {
+    /**
+     * Serializes the edited sign face to JSON. The side is part of the payload so a
+     * back-face edit is not restored onto the front; the legacy plain-array form is
+     * still accepted when reading.
+     */
+    public static String signLinesToJson(String[] rawLines, boolean front) {
         if (rawLines == null) return null;
         List<String> lines = new ArrayList<>();
         boolean any = false;
@@ -72,21 +76,57 @@ public final class BlockStateUtil {
             lines.add(line == null ? "" : line);
             if (line != null && !line.isBlank()) any = true;
         }
-        return any ? GSON.toJson(lines) : null;
+        if (!any) return null;
+        java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("side", front ? "front" : "back");
+        payload.put("lines", lines);
+        return GSON.toJson(payload);
     }
 
-    /** Restores sign front text from a JSON meta string. */
+    /** The four stored lines of a sign log (legacy plain arrays count as the front face). */
+    public static List<String> signLines(String meta) {
+        if (meta == null || meta.isBlank()) return null;
+        try {
+            com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(meta);
+            if (parsed.isJsonArray()) {
+                return GSON.fromJson(parsed, STRING_LIST.getType());
+            }
+            if (parsed.isJsonObject()) {
+                com.google.gson.JsonElement lines = parsed.getAsJsonObject().get("lines");
+                if (lines != null) return GSON.fromJson(lines, STRING_LIST.getType());
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** True when a sign log stores the back face (legacy logs are the front face). */
+    public static boolean signIsBack(String meta) {
+        if (meta == null) return false;
+        try {
+            com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(meta);
+            if (parsed.isJsonObject()) {
+                com.google.gson.JsonElement side = parsed.getAsJsonObject().get("side");
+                return side != null && "back".equals(side.getAsString());
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    /** Restores the sign face stored in a JSON meta string. */
     public static void applySignText(ServerLevel world, BlockPos pos, String meta) {
         if (meta == null || meta.isBlank()) return;
         try {
-            List<String> lines = GSON.fromJson(meta, STRING_LIST.getType());
+            List<String> lines = signLines(meta);
+            boolean front = !signIsBack(meta);
             BlockEntity be = world.getBlockEntity(pos);
             if (be instanceof SignBlockEntity sign && lines != null) {
-                SignText text = sign.getFrontText();
+                SignText text = front ? sign.getFrontText() : sign.getBackText();
                 for (int i = 0; i < 4 && i < lines.size(); i++) {
                     text = text.setMessage(i, Component.literal(lines.get(i)));
                 }
-                sign.setText(text, true);
+                sign.setText(text, front);
                 sign.setChanged();
             }
         } catch (Exception ignored) {

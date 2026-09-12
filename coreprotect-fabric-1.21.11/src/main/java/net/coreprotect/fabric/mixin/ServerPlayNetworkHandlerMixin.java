@@ -33,7 +33,7 @@ public abstract class ServerPlayNetworkHandlerMixin {
         if (mod == null || !mod.config().logging.signEdit) return;
         ServerPlayerEntity player = ((ServerPlayNetworkHandler) (Object) this).getPlayer();
         if (player == null) return;
-        String lines = BlockStateUtil.signLinesToJson(packet.getText());
+        String lines = BlockStateUtil.signLinesToJson(packet.getText(), packet.isFront());
         if (lines == null) return;
         BlockPos pos = packet.getPos();
         mod.database().insertSignAsync(new DatabaseManager.SignLog(

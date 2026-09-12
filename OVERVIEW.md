@@ -46,7 +46,7 @@
 - `/co purge t:<时间>` 清理旧数据、`/co reload` 热重载、`/co status` 查看统计
 - **四种语言**：English / 简体中文 / 繁體中文 / 日本語，自动跟随客户端语言，可 `/co language <代码>` 手动切换（按玩家持久化）
 
-## 1.21 版增强功能（v1.8.1 旗舰版）
+## 1.21 版增强功能（v1.8.2 旗舰版）
 
 `coreprotect-fabric-1.21/` 工程持续迭代，在共有功能之上新增：
 
@@ -65,6 +65,7 @@
 | v1.7.2 | bStats 增加玩家数上报（customCharts 的 players 单线图，配合 bstats.org 服务页的 players 图表显示在线人数） |
 | v1.8.0 | 崩溃防护：WAL 提交每次刷盘（synchronous=full）、异常关闭检测 + 启动时 quick_check 完整性校验、周期性 WAL 检查点 |
 | v1.8.1 | 断电级防护：定期在线热备份（VACUUM INTO，默认 6 小时）、检测到损坏时自动从备份恢复（损坏原件另存），读连接代际自动重开 |
+| v1.8.2 | 三个完整功能版（1.21 / 1.21.11 / 26.1.2）**缺陷修复版**：`#fire` 失效、告示牌正反面、掉落/拾取幽灵记录、回滚安全上限与容器撤销、`/co undo` 误撤销、`a:container` 等 CoreProtect 兼容写法、`e:`/半径/大小写过滤、崩溃标记与关库时序、bStats 退出与更新检查刷屏等（详见各版本 Release 说明） |
 
 ## 版本矩阵（16 个构建）
 
@@ -72,7 +73,7 @@
 
 | Minecraft | 模组版本 | Jar 文件名 | 工程目录 | Java |
 |---|---|---|---|---|
-| 1.21 | 1.8.1（旗舰） | `coreprotect-fabric-1.21-1.8.1.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.8.2（旗舰） | `coreprotect-fabric-1.21-1.8.2.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |
@@ -83,13 +84,13 @@
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.8.1 | `coreprotect-fabric-1.21.11-1.8.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.8.2 | `coreprotect-fabric-1.21.11-1.8.2.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.8.1 | `coreprotect-fabric-26.1.2-1.8.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.8.2 | `coreprotect-fabric-26.1.2-1.8.2.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。**1.21、1.21.11、26.1.2 均为 v1.8.1 完整功能版**（命令、记录范围、配色、数据库结构与崩溃/断电防护完全一致）；其余版本为 v1.0.0 核心功能集。各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
+> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。**1.21、1.21.11、26.1.2 均为 v1.8.2 完整功能版**（命令、记录范围、配色、数据库结构与崩溃/断电防护完全一致）；其余版本为 v1.0.0 核心功能集。各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
 
 ## 安装
 

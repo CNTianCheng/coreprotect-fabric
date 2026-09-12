@@ -37,12 +37,18 @@ public final class TimeUtil {
         long[] multipliers = {604800L, 86400L, 3600L, 60L, 1L};
         long total = 0;
         boolean any = false;
-        for (int i = 0; i < 5; i++) {
-            String group = m.group(i + 1);
-            if (group != null) {
-                total += Long.parseLong(group) * multipliers[i];
-                any = true;
+        try {
+            for (int i = 0; i < 5; i++) {
+                String group = m.group(i + 1);
+                if (group != null) {
+                    // Math.*Exact so an absurd value ("t:99999999999999999w") is rejected
+                    // instead of overflowing into a bogus (possibly negative) duration
+                    total = Math.addExact(total, Math.multiplyExact(Long.parseLong(group), multipliers[i]));
+                    any = true;
+                }
             }
+        } catch (ArithmeticException | NumberFormatException e) {
+            return null;
         }
         return any ? total : null;
     }

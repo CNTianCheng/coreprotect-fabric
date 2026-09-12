@@ -55,7 +55,11 @@ public final class RollbackManager {
     private record BlockUndo(String wid, BlockPos pos, String expected, String apply) {
     }
 
-    private record LastOperation(String kind, List<BlockUndo> blocks) {
+    /** One container item change performed by a rollback/restore, invertible by /co undo. */
+    private record ItemUndo(String wid, BlockPos pos, String item, int amount, boolean wasAdded) {
+    }
+
+    private record LastOperation(String kind, List<BlockUndo> blocks, List<ItemUndo> items) {
     }
 
     /** Returns {@code null} when the operation exceeds the configured safety limit. */
@@ -64,28 +68,42 @@ public final class RollbackManager {
         MinecraftServer server = mod.server();
         ServerPlayer operator = source.getPlayer();
 
-        // 1) Container transactions first, so that chests about to be removed are emptied.
-        List<DatabaseManager.ContainerLog> containerLogs = mod.database().queryContainers(c, -1, 0);
+        // Both queries are capped one row above the safety limit: SQLite treats a negative
+        // LIMIT as "unlimited", which used to load the whole table into memory.
+        long limit = Math.max(1, mod.config().rollback.maxBlocks) + 1L;
+
+        // 1) Safety check BEFORE touching the world: the block set decides whether this
+        //    operation is allowed at all, so a refused rollback must not mutate containers.
+        List<DatabaseManager.BlockLog> logs = mod.database().queryBlocks(c, limit, 0);
+        if (logs == null) {
+            return new Summary(0, 0, 0, 0);
+        }
+        if (logs.size() > mod.config().rollback.maxBlocks) {
+            return null;
+        }
+
+        List<DatabaseManager.ContainerLog> containerLogs = mod.database().queryContainers(c, limit, 0);
         Map<PosKey, List<DatabaseManager.ContainerLog>> groups = groupContainers(containerLogs);
         int itemOps = 0;
+        List<ItemUndo> itemUndos = new ArrayList<>();
         for (Map.Entry<PosKey, List<DatabaseManager.ContainerLog>> entry : groups.entrySet()) {
             ServerLevel world = worldOf(server, entry.getKey().wid());
             if (world == null) continue;
             BlockEntity be = world.getBlockEntity(entry.getKey().pos());
             if (!(be instanceof Container inv)) continue;
             for (DatabaseManager.ContainerLog log : entry.getValue()) {
-                itemOps += reverseContainer(log, inv, operator, world, isRestore);
+                int done = reverseContainer(log, inv, operator, world, isRestore);
+                itemOps += done;
+                if (done > 0) {
+                    // deposit: rollback removes -> undo adds; withdraw: rollback adds -> undo removes
+                    boolean deposit = log.type() == DatabaseManager.CONTAINER_DEPOSIT;
+                    boolean added = isRestore == deposit;
+                    itemUndos.add(new ItemUndo(log.wid(), entry.getKey().pos(), log.data(), log.amount(), added));
+                }
             }
         }
 
         // 2) Blocks: newest log per position wins.
-        List<DatabaseManager.BlockLog> logs = mod.database().queryBlocks(c, -1, 0);
-        if (logs == null) {
-            return new Summary(0, groups.size(), itemOps, 0);
-        }
-        if (logs.size() > mod.config().rollback.maxBlocks) {
-            return null;
-        }
         Map<PosKey, DatabaseManager.BlockLog> latest = new LinkedHashMap<>();
         for (DatabaseManager.BlockLog l : logs) {
             if (Objects.equals(l.oldData(), l.newData())) continue;
@@ -118,9 +136,11 @@ public final class RollbackManager {
             undos.add(new BlockUndo(l.wid(), pos, BlockStateUtil.stringify(target), BlockStateUtil.stringify(expected)));
         }
 
-        if (operator != null && !undos.isEmpty()) {
+        // The undo record is always replaced: a container-only or fully-skipped rollback must
+        // not leave an older operation armed for the next /co undo.
+        if (operator != null) {
             lastOperations.put(operator.getUUID(),
-                    new LastOperation(isRestore ? "restore" : "rollback", undos));
+                    new LastOperation(isRestore ? "restore" : "rollback", undos, itemUndos));
         }
         return new Summary(blocks, groups.size(), itemOps, skipped);
     }
@@ -131,7 +151,7 @@ public final class RollbackManager {
         ServerPlayer operator = source.getPlayer();
         if (operator == null) return null;
         LastOperation op = lastOperations.remove(operator.getUUID());
-        if (op == null || op.blocks().isEmpty()) return null;
+        if (op == null || (op.blocks().isEmpty() && op.items().isEmpty())) return null;
         MinecraftServer server = mod.server();
         int done = 0;
         for (BlockUndo u : op.blocks()) {
@@ -142,7 +162,24 @@ public final class RollbackManager {
             world.setBlock(u.pos(), BlockStateUtil.parse(server, u.apply()), Block.UPDATE_ALL);
             done++;
         }
-        return new Summary(done, 0, 0, 0);
+        int items = 0;
+        for (ItemUndo u : op.items()) {
+            ServerLevel world = worldOf(server, u.wid());
+            if (world == null) continue;
+            BlockEntity be = world.getBlockEntity(u.pos());
+            if (!(be instanceof Container inv)) continue;
+            Identifier id = Identifier.tryParse(u.item());
+            if (id == null) continue;
+            Item item = BuiltInRegistries.ITEM.getOptional(id).orElse(null);
+            if (item == null || item == Items.AIR) continue;
+            if (u.wasAdded()) {
+                removeItems(inv, item, u.amount(), operator, world, u.pos());
+            } else {
+                addItems(inv, new ItemStack(item, u.amount()), world, u.pos());
+            }
+            items++;
+        }
+        return new Summary(done, 0, items, 0);
     }
 
     // ------------------------------------------------------------------
@@ -179,8 +216,10 @@ public final class RollbackManager {
         for (int i = 0; i < inv.getContainerSize() && !remaining.isEmpty(); i++) {
             ItemStack slot = inv.getItem(i);
             if (slot.isEmpty()) {
-                inv.setItem(i, remaining.copy());
-                remaining.setCount(0);
+                // never place more than one stack's worth in a single slot
+                int move = Math.min(remaining.getCount(), remaining.getMaxStackSize());
+                inv.setItem(i, remaining.copyWithCount(move));
+                remaining.shrink(move);
             } else if (ItemStack.isSameItem(slot, remaining) && slot.getCount() < slot.getMaxStackSize()) {
                 int move = Math.min(remaining.getCount(), slot.getMaxStackSize() - slot.getCount());
                 slot.grow(move);
@@ -203,6 +242,11 @@ public final class RollbackManager {
                 remaining -= take;
                 giveStack(operator, taken, world, pos);
             }
+        }
+        // the container held less than the logged amount: hand the missing items out so no
+        // data is silently lost
+        if (remaining > 0) {
+            giveStack(operator, new ItemStack(item, remaining), world, pos);
         }
     }
 

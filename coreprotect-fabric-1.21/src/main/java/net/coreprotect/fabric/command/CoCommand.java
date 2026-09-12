@@ -173,8 +173,10 @@ public final class CoCommand {
 
     private static Token token(SuggestionsBuilder builder) {
         String input = builder.getInput();
-        String remaining = builder.getRemaining();
-        int cursor = input.length() - remaining.length();
+        // brigadier builds suggestions for the end of the input; using
+        // input.length() - remaining.length() here always yielded builder.getStart(),
+        // so the token was always empty and key/player completion never matched
+        int cursor = input.length();
         int start = Math.max(builder.getStart(), 0);
         if (start > cursor) start = cursor;
         String argText = input.substring(start, cursor);
@@ -370,9 +372,14 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        // Like the CoreProtect plugin, u: is optional: a rollback/restore may target every
+        // user within a time/radius/block filter. Requiring no filter at all is still refused.
         if (c.user == null || c.user.isEmpty()) {
-            Messages.error(source, "coreprotect.error.missing_user");
-            return 0;
+            boolean filtered = c.time > 0 || c.radius > 0 || c.block != null || c.exclude != null;
+            if (!filtered) {
+                Messages.error(source, "coreprotect.error.missing_user");
+                return 0;
+            }
         }
         if (c.radius > 0 && c.center == null) {
             c.center = source.getPlayer() != null ? source.getPlayer().getBlockPos() : BlockPos.ORIGIN;
@@ -480,11 +487,19 @@ public final class CoCommand {
         ServerWorld world = mod.server().getOverworld();
         // Place scenarios around the world spawn so they sit inside the always-ticking spawn chunks.
         BlockPos ground = world.getSpawnPos().down();
-        BlockPos fireBase = ground.add(5, 0, 5);
-        // fire burns the wool above it
-        world.setBlockState(fireBase, net.minecraft.block.Blocks.NETHERRACK.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
+        // force-load the test area before placing anything: on 1.21.9+ chunks no longer
+        // tick without players and a setBlock into an unloaded chunk is dropped
+        for (int cx = -1; cx <= 1; cx++) {
+            for (int cz = -1; cz <= 1; cz++) {
+                world.setChunkForced((ground.getX() >> 4) + cx, (ground.getZ() >> 4) + cz, true);
+                world.getChunk((ground.getX() >> 4) + cx, (ground.getZ() >> 4) + cz); // load synchronously
+            }
+        }
+        // fire burns the wool it sits on (kept far from the TNT scenario, which used to
+        // destroy the fire before it could spread)
+        BlockPos fireBase = ground.add(-8, 0, 8);
+        world.setBlockState(fireBase, net.minecraft.block.Blocks.WHITE_WOOL.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
         world.setBlockState(fireBase.up(), net.minecraft.block.Blocks.FIRE.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
-        world.setBlockState(fireBase.up(2), net.minecraft.block.Blocks.WHITE_WOOL.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
         // flowing water washes away the torch (kept far from the fire scenario)
         BlockPos waterBase = ground.add(-5, 0, -5);
         world.setBlockState(waterBase.up(), net.minecraft.block.Blocks.TORCH.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
@@ -523,6 +538,10 @@ public final class CoCommand {
         }
         // piston pushing a wool block (in the air, so the push always succeeds) -> #piston records
         BlockPos pistonBase = world.getSpawnPos().add(0, 1, 20);
+        // clear the pushed block and its destination first: leftovers from an earlier test
+        // (an old piston head, for example) would make the push fail
+        world.setBlockState(pistonBase.north(2), net.minecraft.block.Blocks.AIR.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
+        world.setBlockState(pistonBase.north(), net.minecraft.block.Blocks.AIR.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
         world.setBlockState(pistonBase, net.minecraft.block.Blocks.PISTON.getDefaultState()
                 .with(net.minecraft.block.PistonBlock.FACING, net.minecraft.util.math.Direction.NORTH), net.minecraft.block.Block.NOTIFY_ALL);
         world.setBlockState(pistonBase.north(), net.minecraft.block.Blocks.WHITE_WOOL.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);

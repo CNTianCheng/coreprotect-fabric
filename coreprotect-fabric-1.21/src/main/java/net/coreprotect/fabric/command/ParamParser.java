@@ -61,7 +61,8 @@ public final class ParamParser {
                     case "u" -> c.user = v;
                     case "t" -> {
                         Long seconds = TimeUtil.parseSeconds(v);
-                        if (seconds == null) return ParseResult.error("coreprotect.error.invalid_time", v);
+                        // a positive duration is required: t:0 would otherwise mean "everything"
+                        if (seconds == null || seconds <= 0) return ParseResult.error("coreprotect.error.invalid_time", v);
                         c.time = TimeUtil.now() - seconds;
                     }
                     case "a" -> c.action = v.toLowerCase();

@@ -21,6 +21,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import net.coreprotect.fabric.CoreProtectFabric;
@@ -124,6 +125,10 @@ public final class DatabaseManager {
         return t;
     });
     private final ThreadLocal<Object[]> readHolder = new ThreadLocal<>();
+    /** Every open read connection, so they can all be closed before the database file is moved. */
+    private final Set<Connection> readConnections = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Set on the calling thread when its last read failed, so callers can report it. */
+    private final ThreadLocal<Boolean> lastReadFailed = ThreadLocal.withInitial(() -> Boolean.FALSE);
     /** Bumped after an automatic restore so reader threads reopen their connections. */
     private final java.util.concurrent.atomic.AtomicInteger generation = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -294,8 +299,11 @@ public final class DatabaseManager {
 
     private void applyPragmas(Connection c, boolean readOnly) {
         try (Statement st = c.createStatement()) {
+            // negative cache_size = KiB of page cache; long maths so a large configured
+            // value cannot overflow into a nonsense pragma value
+            long cacheKb = -(long) CoreProtectFabric.instance().config().database.cacheSizeMB * 1024L;
             st.execute("PRAGMA busy_timeout=10000");
-            st.execute("PRAGMA cache_size=" + (-CoreProtectFabric.instance().config().database.cacheSizeMB * 1024));
+            st.execute("PRAGMA cache_size=" + cacheKb);
             st.execute("PRAGMA mmap_size=1073741824");
             st.execute("PRAGMA temp_store=MEMORY");
             if (readOnly) {
@@ -318,6 +326,10 @@ public final class DatabaseManager {
      */
     public void quickCheck() {
         execute(() -> {
+            if (conn == null) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Skipping the integrity check: no database connection.");
+                return null;
+            }
             String result = quickCheckResult(conn);
             if ("ok".equalsIgnoreCase(result)) {
                 CoreProtectFabric.LOGGER.info("[CoreProtect] Database integrity check passed (quick_check: ok).");
@@ -331,6 +343,10 @@ public final class DatabaseManager {
                 Path shm = db.resolveSibling(db.getFileName() + "-shm");
                 Path corruptDir = db.resolveSibling(db.getFileName() + ".corrupt-" + ts);
                 Files.createDirectories(corruptDir);
+                // Release every file handle first: on Windows the reader connections (and the
+                // 1 GB mmap) keep the database locked, so moving it would fail and abort recovery.
+                open = false; // writes are dropped while the files are swapped
+                closeReadConnections();
                 try {
                     conn.close();
                 } catch (SQLException ignored) {
@@ -356,6 +372,7 @@ public final class DatabaseManager {
                 conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
                 applyPragmas(conn, false);
                 initSchema(conn);
+                open = true;
                 generation.incrementAndGet(); // reader threads reopen their connections on next use
                 if (restored) {
                     CoreProtectFabric.LOGGER.info("[CoreProtect] Database restored from the latest backup ({}).", backup.getFileName());
@@ -364,7 +381,9 @@ public final class DatabaseManager {
                             + "The corrupted copy is kept in {} for manual recovery.", corruptDir);
                 }
             } catch (Exception recoveryError) {
-                CoreProtectFabric.LOGGER.error("[CoreProtect] Automatic recovery failed", recoveryError);
+                // never leave open == true with conn == null: writes would NPE forever
+                open = false;
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Automatic recovery failed; logging is suspended until the next restart", recoveryError);
             }
             return null;
         });
@@ -417,39 +436,40 @@ public final class DatabaseManager {
 
     public void close() {
         if (!open) return;
-        execute(() -> {
-            open = false;
-            if (conn != null) {
-                try (Statement st = conn.createStatement()) {
-                    st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                } catch (SQLException ignored) {
+        open = false; // drop any write that arrives from now on
+        // Flush and close on the writer thread, but never lose the close task to a timed
+        // get(): a backup/purge queued ahead of it used to push it past the 60 s timeout.
+        try {
+            worker.submit(() -> {
+                if (conn != null) {
+                    try (Statement st = conn.createStatement()) {
+                        st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+                    } catch (SQLException ignored) {
+                    }
+                    try {
+                        conn.close();
+                    } catch (SQLException ignored) {
+                    }
+                    conn = null;
                 }
+            }).get(5, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Database close task did not finish cleanly: {}", e.toString());
+            if (conn != null) {
                 try {
                     conn.close();
                 } catch (SQLException ignored) {
                 }
                 conn = null;
             }
-            return null;
-        });
+        }
         worker.shutdown();
         try {
             worker.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        // one cleanup task per reader thread: runs on that thread and closes its connection
-        for (int i = 0; i < readThreads; i++) {
-            readPool.submit(() -> {
-                Object[] holder = readHolder.get();
-                if (holder != null && holder[1] instanceof Connection c) {
-                    try {
-                        c.close();
-                    } catch (SQLException ignored) {
-                    }
-                }
-            });
-        }
+        closeReadConnections();
         readPool.shutdown();
         try {
             readPool.awaitTermination(5, TimeUnit.SECONDS);
@@ -458,13 +478,29 @@ public final class DatabaseManager {
         }
     }
 
+    /**
+     * Closes every pooled read connection. The connections are tracked in a set
+     * (instead of relying on one cleanup task per pool thread) so none of them can
+     * keep the database file locked on Windows.
+     */
+    private void closeReadConnections() {
+        generation.incrementAndGet(); // makes every reader discard its (closed) connection
+        for (Connection c : readConnections) {
+            try {
+                c.close();
+            } catch (SQLException ignored) {
+            }
+        }
+        readConnections.clear();
+    }
+
     // ------------------------------------------------------------------
     // Async writes (single writer thread)
     // ------------------------------------------------------------------
 
     public void insertBlockAsync(BlockLog l) {
         trackUser(l.user());
-        worker.submit(() -> {
+        submitWrite(() -> {
             long oldId = stateId(l.oldData());
             long newId = stateId(l.newData());
             try (PreparedStatement ps = conn.prepareStatement(
@@ -480,7 +516,7 @@ public final class DatabaseManager {
 
     public void insertContainerAsync(ContainerLog l) {
         trackUser(l.user());
-        worker.submit(() -> {
+        submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT INTO co_container(time,user,wid,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
@@ -494,7 +530,7 @@ public final class DatabaseManager {
 
     public void insertItemAsync(ItemLog l) {
         trackUser(l.user());
-        worker.submit(() -> {
+        submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT INTO co_item(time,user,wid,x,y,z,action,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
@@ -514,7 +550,7 @@ public final class DatabaseManager {
 
     public void insertEntityAsync(EntityLog l) {
         trackUser(l.user());
-        worker.submit(() -> {
+        submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT INTO co_entity(time,user,wid,x,y,z,data_id,action) VALUES(?,?,?,?,?,?,?,?)")) {
@@ -651,6 +687,14 @@ public final class DatabaseManager {
                             + "FROM co_item i LEFT JOIN co_state s ON s.id=i.data_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
+            // '+item' = pickups, '-item' = drops; plain 'item' shows both
+            if ("+item".equals(c.action)) {
+                sql.append(" AND i.action = ?");
+                params.add("+");
+            } else if ("-item".equals(c.action)) {
+                sql.append(" AND i.action = ?");
+                params.add("-");
+            }
             sql.append(" ORDER BY i.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
             params.add(offset);
@@ -715,13 +759,15 @@ public final class DatabaseManager {
                     "SELECT e.id,e.time,e.user,e.wid,e.x,e.y,e.z,s.state,e.action "
                             + "FROM co_entity e LEFT JOIN co_state s ON s.id=e.data_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
-            if (c.time > 0) {
-                sql.append(" AND e.time >= ?");
-                params.add(c.time);
-            }
-            if (c.user != null && !c.user.isEmpty()) {
-                sql.append(" AND e.user = ?");
-                params.add(c.user);
+            // reuse the common filters so a:#kill also honours r:/t:/u:/e:
+            appendCommonFilters(sql, params, c);
+            // '#kill' only shows kills, '#death' only deaths; the plain '#kill' alias used to mix both
+            if ("#kill".equals(c.action) || "kill".equals(c.action) || "#kills".equals(c.action)) {
+                sql.append(" AND e.action = ?");
+                params.add("kill");
+            } else if ("#death".equals(c.action) || "death".equals(c.action)) {
+                sql.append(" AND e.action = ?");
+                params.add("death");
             }
             sql.append(" ORDER BY e.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
@@ -931,10 +977,12 @@ public final class DatabaseManager {
             params.add(c.time);
         }
         if (c.user != null && !c.user.isEmpty()) {
-            sql.append(" AND user = ?");
+            // player names are matched case-insensitively, like /co online does
+            sql.append(" AND user = ? COLLATE NOCASE");
             params.add(c.user);
         }
         if (c.exclude != null && !c.exclude.isEmpty()) {
+            // e:<value>: never match this user (kept for compatibility)
             sql.append(" AND user <> ?");
             params.add(c.exclude);
         }
@@ -971,6 +1019,18 @@ public final class DatabaseManager {
             params.add(like);
             params.add(like);
         }
+        if (c.exclude != null && !c.exclude.isEmpty()) {
+            // e: also excludes a matching action/cause (#tnt, #fire, ...) or block type
+            // (e:stone); previously it was compared against the user column only, so a
+            // block exclusion silently filtered nothing
+            String like = "%" + c.exclude.toLowerCase() + "%";
+            sql.append(" AND b.action <> ?")
+                    .append(" AND (so.state IS NULL OR so.state NOT LIKE ?)")
+                    .append(" AND (sn.state IS NULL OR sn.state NOT LIKE ?)");
+            params.add(c.exclude);
+            params.add(like);
+            params.add(like);
+        }
     }
 
     private void appendBlockAction(StringBuilder sql, List<Object> params, String action) {
@@ -1001,28 +1061,49 @@ public final class DatabaseManager {
     /** Synchronous read on the parallel read pool (one connection per reader thread). */
     private <T> T executeRead(Callable<T> task) {
         try {
-            return readPool.submit(task).get(30, TimeUnit.SECONDS);
+            T result = readPool.submit(task).get(30, TimeUnit.SECONDS);
+            lastReadFailed.set(Boolean.FALSE);
+            return result;
         } catch (Exception e) {
+            lastReadFailed.set(Boolean.TRUE);
             CoreProtectFabric.LOGGER.error("[CoreProtect] Database read failed", e);
             return null;
         }
     }
 
-    /** The caller-thread read connection (lazily opened, query-only). */
-    private Connection readConnection() {
+    /** True when the last read issued by this thread failed (timeout or SQL error). */
+    public boolean readFailed() {
+        return Boolean.TRUE.equals(lastReadFailed.get());
+    }
+
+    /**
+     * The caller-thread read connection (lazily opened, query-only). Throws instead of
+     * returning {@code null} so a failure surfaces as a readable SQL error and never as
+     * a bare NPE on {@code readConnection().prepareStatement(...)}.
+     */
+    private Connection readConnection() throws SQLException {
         Object[] holder = readHolder.get();
         if (holder != null && (Integer) holder[0] == generation.get() && holder[1] instanceof Connection c) {
             return c;
+        }
+        // generation changed (restore/close): drop the outdated connection instead of leaking it
+        if (holder != null && holder[1] instanceof Connection old) {
+            readHolder.remove();
+            readConnections.remove(old);
+            try {
+                old.close();
+            } catch (SQLException ignored) {
+            }
         }
         try {
             Class.forName("org.sqlite.JDBC");
             Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
             applyPragmas(c, true);
+            readConnections.add(c);
             readHolder.set(new Object[] { generation.get(), c });
             return c;
         } catch (Exception e) {
-            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to open read connection", e);
-            return null;
+            throw new SQLException("Failed to open a read connection", e);
         }
     }
 
@@ -1054,7 +1135,7 @@ public final class DatabaseManager {
     }
 
     private void enqueue(String sql, List<Object> params) {
-        worker.submit(() -> {
+        submitWrite(() -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 bind(ps, params);
                 ps.executeUpdate();
@@ -1062,6 +1143,21 @@ public final class DatabaseManager {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: " + sql, e);
             }
         });
+    }
+
+    /**
+     * Queues a write on the single writer thread. Writes that arrive after the
+     * database was closed (server shutdown, listener callbacks still firing) are
+     * dropped instead of throwing {@link RejectedExecutionException} on the
+     * server thread.
+     */
+    private void submitWrite(Runnable task) {
+        if (!open) return;
+        try {
+            worker.submit(task);
+        } catch (RejectedExecutionException e) {
+            // the writer is shutting down; dropping the row is the only safe option
+        }
     }
 
     private static void bind(PreparedStatement ps, List<Object> params) throws SQLException {

@@ -183,8 +183,10 @@ public final class CoCommand {
 
     private static Token token(SuggestionsBuilder builder) {
         String input = builder.getInput();
-        String remaining = builder.getRemaining();
-        int cursor = input.length() - remaining.length();
+        // brigadier builds suggestions for the end of the input; using
+        // input.length() - remaining.length() here always yielded builder.getStart(),
+        // so the token was always empty and key/player completion never matched
+        int cursor = input.length();
         int start = Math.max(builder.getStart(), 0);
         if (start > cursor) start = cursor;
         String argText = input.substring(start, cursor);
@@ -380,9 +382,14 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        // Like the CoreProtect plugin, u: is optional: a rollback/restore may target every
+        // user within a time/radius/block filter. Requiring no filter at all is still refused.
         if (c.user == null || c.user.isEmpty()) {
-            Messages.error(source, "coreprotect.error.missing_user");
-            return 0;
+            boolean filtered = c.time > 0 || c.radius > 0 || c.block != null || c.exclude != null;
+            if (!filtered) {
+                Messages.error(source, "coreprotect.error.missing_user");
+                return 0;
+            }
         }
         if (c.radius > 0 && c.center == null) {
             c.center = source.getPlayer() != null ? source.getPlayer().blockPosition() : BlockPos.ZERO;
@@ -488,16 +495,24 @@ public final class CoCommand {
     private static int debugNatural(CommandSourceStack source) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         ServerLevel world = mod.server().overworld();
-        // Place scenarios around the world spawn so they sit inside the always-ticking spawn chunks.
+        // Place scenarios around the world spawn so they sit inside the spawn chunks.
         BlockPos ground = CoreProtectFabric.instance().server().getRespawnData().pos().below();
-        // 1.21.9+ / 26.x: chunks no longer tick without players. Force-load the whole test
-        // area BEFORE placing anything, otherwise setBlock on an unloaded chunk is dropped.
+        // 1.21.9+ / 26.x: chunks no longer tick without players and a setBlock into a chunk
+        // that is not loaded yet is dropped, so the area is force-loaded first and the
+        // scenarios are placed on the next server tick (by then the chunks really exist).
         for (int cx = -1; cx <= 1; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
                 world.setChunkForced((ground.getX() >> 4) + cx, (ground.getZ() >> 4) + cz, true);
-                world.getChunk((ground.getX() >> 4) + cx, (ground.getZ() >> 4) + cz); // load synchronously
             }
         }
+        BlockPos fireBase = ground.offset(-8, 0, 8);
+        mod.server().execute(() -> placeNaturalScenarios(world, ground));
+        Messages.cmd(source, "coreprotect.debug.natural_started", fireBase.getX(), fireBase.getZ());
+        return 1;
+    }
+
+    /** Places the natural-event test scenarios (runs one tick after the chunks were loaded). */
+    private static void placeNaturalScenarios(ServerLevel world, BlockPos ground) {
         // fire burns the wool it sits on (kept far from the TNT scenario)
         BlockPos fireBase = ground.offset(-8, 0, 8);
         world.setBlock(fireBase, Blocks.WHITE_WOOL.defaultBlockState(), Block.UPDATE_ALL);
@@ -540,11 +555,13 @@ public final class CoCommand {
         }
         // piston pushing a wool block (in the air, so the push always succeeds) -> #piston records
         BlockPos pistonBase = CoreProtectFabric.instance().server().getRespawnData().pos().offset(0, 1, 20);
+        // clear the pushed block and its destination first: leftovers from an earlier test
+        // (an old piston head, for example) would make the push fail
+        world.setBlock(pistonBase.north(2), Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(pistonBase.north(), Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
         world.setBlock(pistonBase, Blocks.PISTON.defaultBlockState()
                 .setValue(PistonBaseBlock.FACING, Direction.NORTH), Block.UPDATE_ALL);
         world.setBlock(pistonBase.north(), Blocks.WHITE_WOOL.defaultBlockState(), Block.UPDATE_ALL);
         world.setBlock(pistonBase.south(), Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
-        Messages.cmd(source, "coreprotect.debug.natural_started", fireBase.getX(), fireBase.getZ());
-        return 1;
     }
 }

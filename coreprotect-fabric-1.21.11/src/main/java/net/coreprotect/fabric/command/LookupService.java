@@ -29,8 +29,13 @@ public final class LookupService {
     };
 
     private static final Set<String> VALID_ACTIONS = Set.of(
-            "block", "+block", "-block", "#container", "#kill", "#kills", "#chat",
-            "#command", "#session", "+session", "-session", "item", "#item", "#sign");
+            "block", "+block", "-block",
+            "container", "+container", "-container", "#container",
+            "kill", "kills", "#kill", "#kills", "death", "#death",
+            "chat", "#chat", "command", "#command",
+            "session", "+session", "-session", "#session",
+            "item", "+item", "-item", "#item",
+            "sign", "#sign");
 
     private LookupService() {
     }
@@ -53,25 +58,32 @@ public final class LookupService {
         long offset = Math.max(0, (long) (c.page - 1) * pageSize);
         List<Text> rows = new ArrayList<>();
 
+        // 'container', 'kill', 'chat', ... are accepted without the leading '#' so the
+        // CoreProtect-style "a:container" spelling works as expected.
         switch (action) {
-            case "#container" ->
+            case "container", "+container", "-container", "#container" ->
                     rows.addAll(formatContainerRows(source, orEmpty(mod.database().queryContainers(c, pageSize, offset))));
-            case "item", "#item" ->
+            case "item", "+item", "-item", "#item" ->
                     rows.addAll(formatItemRows(source, orEmpty(mod.database().queryItems(c, pageSize, offset))));
-            case "#sign" ->
+            case "sign", "#sign" ->
                     rows.addAll(formatSignRows(source, orEmpty(mod.database().querySigns(c, pageSize, offset))));
-            case "#kill", "#kills" ->
+            case "kill", "kills", "#kill", "#kills", "death", "#death" ->
                     rows.addAll(formatEntityRows(source, orEmpty(mod.database().queryEntities(c, pageSize, offset))));
-            case "#chat" ->
+            case "chat", "#chat" ->
                     rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryChat(c, pageSize, offset))));
-            case "#command" ->
+            case "command", "#command" ->
                     rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryCommands(c, pageSize, offset))));
-            case "#session", "+session", "-session" ->
+            case "session", "+session", "-session", "#session" ->
                     rows.addAll(formatSessionRows(source, orEmpty(mod.database().querySessions(c, pageSize, offset))));
             default ->
                     rows.addAll(formatBlockRows(source, orEmpty(mod.database().queryBlocks(c, pageSize, offset))));
         }
 
+        // a failed read (timeout / SQL error) must never be reported as "no results"
+        if (mod.database().readFailed()) {
+            Messages.error(source, "coreprotect.error.db", "database read failed");
+            return 0;
+        }
         if (rows == null || rows.isEmpty()) {
             Messages.cmd(source, "coreprotect.lookup.empty");
             return 1;
@@ -307,17 +319,15 @@ public final class LookupService {
 
     private static String signSuffix(String meta) {
         if (meta == null || meta.isBlank()) return null;
-        try {
-            List<String> lines = GSON.fromJson(meta, STRING_LIST.getType());
-            if (lines == null) return null;
-            List<String> nonBlank = new ArrayList<>();
-            for (String line : lines) {
-                if (!line.isBlank()) nonBlank.add(line);
-            }
-            return nonBlank.isEmpty() ? null : String.join(" | ", nonBlank);
-        } catch (Exception e) {
-            return null;
+        List<String> lines = BlockStateUtil.signLines(meta);
+        if (lines == null) return null;
+        List<String> nonBlank = new ArrayList<>();
+        for (String line : lines) {
+            if (line != null && !line.isBlank()) nonBlank.add(line);
         }
+        if (nonBlank.isEmpty()) return null;
+        String text = String.join(" | ", nonBlank);
+        return BlockStateUtil.signIsBack(meta) ? text + " (back)" : text;
     }
 
     private static String signLines(String meta) {

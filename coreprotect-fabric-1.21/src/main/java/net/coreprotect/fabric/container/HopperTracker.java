@@ -25,7 +25,26 @@ import net.minecraft.world.World;
  * user {@code #hopper} at the affected container's position.
  */
 public final class HopperTracker {
-    private final Map<BlockPos, Map<String, Integer>> snapshots = new ConcurrentHashMap<>();
+        /** Per-container baseline, keyed by dimension + position so worlds never mix. */
+    private final Map<String, Snapshot> snapshots = new ConcurrentHashMap<>();
+
+    /** A container that was not observed for this long is treated as a fresh baseline. */
+    private static final long STALE_SECONDS = 120L;
+    private static final int MAX_SNAPSHOTS = 20000;
+
+    private static final class Snapshot {
+        final Map<String, Integer> counts;
+        final long time;
+
+        Snapshot(Map<String, Integer> counts, long time) {
+            this.counts = counts;
+            this.time = time;
+        }
+    }
+
+    private static String key(String wid, BlockPos pos) {
+        return wid + "|" + pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
 
     public void onHopperTick(World world, BlockPos pos, BlockState state, HopperBlockEntity blockEntity) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
@@ -51,8 +70,13 @@ public final class HopperTracker {
 
     private void diffAndLog(CoreProtectFabric mod, ServerWorld world, String wid, BlockPos pos, Inventory inv, long time) {
         Map<String, Integer> after = snapshot(inv);
-        Map<String, Integer> before = snapshots.put(pos, after);
-        if (before == null) return; // first observation establishes the baseline
+        String key = key(wid, pos);
+        Snapshot previous = snapshots.put(key, new Snapshot(after, time));
+        if (snapshots.size() > MAX_SNAPSHOTS) snapshots.clear(); // bounded growth for long uptimes
+        // first observation, or the container was unloaded/ticking again after a long pause:
+        // only establish a new baseline, never diff against a stale one
+        if (previous == null || time - previous.time > STALE_SECONDS) return;
+        Map<String, Integer> before = previous.counts;
         for (Map.Entry<String, Integer> entry : after.entrySet()) {
             String id = entry.getKey();
             int delta = entry.getValue() - before.getOrDefault(id, 0);

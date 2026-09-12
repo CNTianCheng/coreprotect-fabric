@@ -138,6 +138,8 @@ public final class CoreProtectConfig {
 
     private transient Path path;
     private transient boolean endpointMigrated;
+    /** Set when load() had to clamp or fill a value, so the corrected config is written back. */
+    private transient boolean configCorrected;
 
     public Path path() {
         if (path == null) {
@@ -165,8 +167,13 @@ public final class CoreProtectConfig {
             }
             CoreProtectConfig loaded = GSON.fromJson(json, CoreProtectConfig.class);
             if (loaded == null) return;
+            boolean corrected = false;
             // merge top-level fields, keeping nested defaults for missing sections
-            this.language = loaded.language;
+            if (loaded.language != null && !loaded.language.isBlank()) {
+                this.language = loaded.language;
+            } else {
+                corrected = true;
+            }
             this.databaseFile = loaded.databaseFile;
             if (loaded.logging != null) {
                 this.logging = loaded.logging;
@@ -180,35 +187,77 @@ public final class CoreProtectConfig {
             if (loaded.metrics != null) this.metrics = loaded.metrics;
             if (loaded.updateCheck != null) this.updateCheck = loaded.updateCheck;
             if (loaded.database != null) this.database = loaded.database;
-            if (this.database.cacheSizeMB < 16) this.database.cacheSizeMB = 128;
-            if (!"normal".equalsIgnoreCase(this.database.syncMode)) this.database.syncMode = "full";
-            if (this.database.checkpointMinutes < 1) this.database.checkpointMinutes = 10;
-            if (this.database.backupMinutes < 0) this.database.backupMinutes = 360;
+            // every clamp below is remembered so the corrected values are written back to
+            // disk; otherwise the file kept the bad value and it was re-applied on each start
+            if (this.database.cacheSizeMB < 16 || this.database.cacheSizeMB > 8192) {
+                this.database.cacheSizeMB = 128;
+                corrected = true;
+            }
+            if (!"normal".equalsIgnoreCase(this.database.syncMode)) {
+                this.database.syncMode = "full";
+                corrected = true;
+            }
+            if (this.database.checkpointMinutes < 1) {
+                this.database.checkpointMinutes = 10;
+                corrected = true;
+            }
+            if (this.database.backupMinutes < 0) {
+                this.database.backupMinutes = 360;
+                corrected = true;
+            }
             if (this.permissionGroups.groups == null) this.permissionGroups.groups = new java.util.LinkedHashMap<>();
-            if (this.lookup.maxLines < 1) this.lookup.maxLines = 10;
-            if (this.lookup.inspectLines < 1) this.lookup.inspectLines = 8;
-            if (this.lookup.defaultTimeSeconds < 0) this.lookup.defaultTimeSeconds = 604800;
-            if (this.rollback.maxBlocks < 1) this.rollback.maxBlocks = 5000;
-            if (this.dataRetention.maxDays < 1) this.dataRetention.maxDays = 30;
-            if (this.metrics.serviceId < 0) this.metrics.serviceId = 0;
+            if (this.lookup.maxLines < 1) {
+                this.lookup.maxLines = 10;
+                corrected = true;
+            }
+            if (this.lookup.inspectLines < 1) {
+                this.lookup.inspectLines = 8;
+                corrected = true;
+            }
+            if (this.lookup.defaultTimeSeconds < 0) {
+                this.lookup.defaultTimeSeconds = 604800;
+                corrected = true;
+            }
+            if (this.rollback.maxBlocks < 1) {
+                this.rollback.maxBlocks = 5000;
+                corrected = true;
+            }
+            if (this.dataRetention.maxDays < 1) {
+                this.dataRetention.maxDays = 30;
+                corrected = true;
+            }
+            if (this.metrics.serviceId < 0) {
+                this.metrics.serviceId = 0;
+                corrected = true;
+            }
             if (this.metrics.endpoint == null || this.metrics.endpoint.isBlank()
                     || this.metrics.endpoint.contains("/api/v2/data/fabric")) {
                 // "fabric" is not a valid bStats platform; the service is registered under
                 // "server-implementation" (the platform for server-side mods).
                 this.metrics.endpoint = "https://bstats.org/api/v2/data/server-implementation";
                 endpointMigrated = true;
+                corrected = true;
             }
             if (this.updateCheck.slug == null || this.updateCheck.slug.isBlank()) {
                 this.updateCheck.slug = "coreprotect-fabric";
+                corrected = true;
             }
-            if (this.updateCheck.intervalHours < 1) this.updateCheck.intervalHours = 12;
-            if (this.databaseFile == null || this.databaseFile.isBlank()) this.databaseFile = "coreprotect.db";
+            if (this.updateCheck.intervalHours < 1) {
+                this.updateCheck.intervalHours = 12;
+                corrected = true;
+            }
+            if (this.databaseFile == null || this.databaseFile.isBlank()) {
+                this.databaseFile = "coreprotect.db";
+                corrected = true;
+            }
+            if (corrected) configCorrected = true;
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to load config, using defaults", e);
         }
-        if (endpointMigrated) {
+        if (endpointMigrated || configCorrected) {
             endpointMigrated = false;
-            save(); // persist corrections (e.g. the bStats endpoint fix) back to disk
+            configCorrected = false;
+            save(); // persist corrections (bStats endpoint fix, clamped values) back to disk
         }
     }
 

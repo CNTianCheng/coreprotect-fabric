@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
 
 public final class CoreProtectFabric implements ModInitializer {
     public static final String MOD_ID = "coreprotect";
-    public static final String MOD_VERSION = "1.8.1";
+    public static final String MOD_VERSION = "1.8.2";
     public static final Logger LOGGER = LoggerFactory.getLogger("CoreProtect");
 
     /**
@@ -53,8 +53,7 @@ public final class CoreProtectFabric implements ModInitializer {
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal", "#enderman", "#piston",
             "#water", "#lava", "#fluid");
     private static final Set<String> BREAK_CAUSES = Set.of(
-            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston");
-    private static final Set<String> EXPLOSION_CAUSES = Set.of(
+            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston");    private static final Set<String> EXPLOSION_CAUSES = Set.of(
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal");
     private static final Set<String> FLUID_CAUSES = Set.of("#water", "#lava", "#fluid");
 
@@ -126,15 +125,28 @@ public final class CoreProtectFabric implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> CoCommand.register(dispatcher));
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(s -> onServerStopping());
+        // Closing the database only after every disconnect/stop callback has run keeps
+        // session-leave rows and open-container diffs from being dropped.
+        ServerLifecycleEvents.SERVER_STOPPED.register(this::onServerStopped);
         LOGGER.info("[CoreProtect] Fabric version {} initialized.", MOD_VERSION);
+    }
+
+    private static Path crashMarkerPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("coreprotect-fabric.crash-marker");
     }
 
     private void onServerStarted(MinecraftServer srv) {
         this.server = srv;
-        // Crash detection: the marker only exists while the server is running. If it is
-        // still there from the previous run, the last shutdown was not clean (crash).
-        Path crashMarker = FabricLoader.getInstance().getConfigDir().resolve("coreprotect-fabric.crash-marker");
+        // Crash detection: the marker only exists while the server is running. It is written
+        // FIRST so a crash during start-up (config/database init) is still detected, and it is
+        // only deleted in SERVER_STOPPED, i.e. after a clean shutdown completed.
+        Path crashMarker = crashMarkerPath();
         boolean uncleanShutdown = Files.exists(crashMarker);
+        try {
+            Files.writeString(crashMarker, String.valueOf(System.currentTimeMillis()));
+        } catch (Exception e) {
+            LOGGER.warn("[CoreProtect] Failed to write the crash marker", e);
+        }
         if (uncleanShutdown) {
             LOGGER.warn("[CoreProtect] Previous shutdown was not clean (server crash detected); verifying the database...");
         }
@@ -143,11 +155,6 @@ public final class CoreProtectFabric implements ModInitializer {
         this.database.open();
         if (uncleanShutdown) {
             this.database.quickCheck();
-        }
-        try {
-            Files.writeString(crashMarker, String.valueOf(System.currentTimeMillis()));
-        } catch (Exception e) {
-            LOGGER.warn("[CoreProtect] Failed to write the crash marker", e);
         }
         LOGGER.info("[CoreProtect] Enabled. Database: {}, default language: {}",
                 this.database.dbPath(), this.config.language);
@@ -170,11 +177,16 @@ public final class CoreProtectFabric implements ModInitializer {
         if (this.updateChecker != null) {
             this.updateChecker.shutdown();
         }
+        // containers are finalized here while the world is still available; the database
+        // itself is closed in onServerStopped() so the disconnect callbacks still land
         this.containerTracker.finalizeAll();
+    }
+
+    /** Runs after the world and all players are gone: flush the database and clear the marker. */
+    private void onServerStopped(MinecraftServer srv) {
         this.database.close();
-        // Graceful shutdown: remove the crash marker so the next start knows everything was closed cleanly.
         try {
-            Files.deleteIfExists(FabricLoader.getInstance().getConfigDir().resolve("coreprotect-fabric.crash-marker"));
+            Files.deleteIfExists(crashMarkerPath());
         } catch (Exception e) {
             LOGGER.warn("[CoreProtect] Failed to remove the crash marker", e);
         }
@@ -192,10 +204,14 @@ public final class CoreProtectFabric implements ModInitializer {
         if (!mod.config.logging.natural) return;
         NaturalBreakCause.Cause cause = NaturalBreakCause.get();
         if (cause == null || !SET_STATE_CAUSES.contains(cause.type)) return;
-        if (cause.lastBreakPos != null && cause.lastBreakPos.equals(pos)) return;
-        if (cause.lastSetPos != null && cause.lastSetPos.equals(pos)) return;
         BlockState oldState = world.getBlockState(pos);
         if (oldState.equals(newState)) return;
+        // state-only changes (water level, piston extension, dropper "triggered", ...) are not
+        // block changes; the same block type in and out is noise for a rollback log
+        if (oldState.getBlock() == newState.getBlock()) return;
+        // Delegated overloads of setBlockState report the same change twice; a genuine
+        // second change at the same position (different states) is still logged.
+        if (cause.alreadyLoggedSet(pos, oldState, newState)) return;
         // Piston mechanism noise: the head extending into air and the moving ghost /
         // head states themselves are not meaningful records ("piston changed air").
         if ("#piston".equals(cause.type)
@@ -206,6 +222,8 @@ public final class CoreProtectFabric implements ModInitializer {
         if (FLUID_CAUSES.contains(cause.type)
                 && (oldState.isAir() || oldState.getBlock() instanceof FluidBlock)) return;
         cause.lastSetPos = pos;
+        cause.lastSetOld = oldState;
+        cause.lastSetNew = newState;
         mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, newState, cause.type));
     }
 
@@ -215,14 +233,15 @@ public final class CoreProtectFabric implements ModInitializer {
         if (!mod.config.logging.natural) return;
         NaturalBreakCause.Cause cause = NaturalBreakCause.get();
         if (cause == null || !BREAK_CAUSES.contains(cause.type)) return;
-        if (cause.lastBreakPos != null && cause.lastBreakPos.equals(pos)) return;
         BlockState oldState = world.getBlockState(pos);
         if (oldState.isAir()) return;
+        if (cause.alreadyLoggedBreak(pos, oldState)) return;
         // Fire spread also removes adjacent fire blocks; only real block burns are logged.
         if ("#fire".equals(cause.type) && oldState.getBlock() instanceof AbstractFireBlock) return;
         // Piston head / moving ghost removal is mechanism noise, not a real block change.
         if ("#piston".equals(cause.type) && isPistonPart(oldState)) return;
         cause.lastBreakPos = pos;
+        cause.lastBreakOld = oldState;
         mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, Blocks.AIR.getDefaultState(), cause.type));
     }
 

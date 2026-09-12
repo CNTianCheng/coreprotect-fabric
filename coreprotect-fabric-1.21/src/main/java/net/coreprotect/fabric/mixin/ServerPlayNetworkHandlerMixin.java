@@ -8,7 +8,6 @@ import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.network.packet.c2s.play.CommandExecutionC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSignC2SPacket;
-import net.minecraft.server.filter.FilteredMessage;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
@@ -30,13 +29,13 @@ public abstract class ServerPlayNetworkHandlerMixin {
         mod.database().insertCommandAsync(TimeUtil.now(), player.getGameProfile().getName(), packet.command());
     }
 
-    @Inject(method = "onSignUpdate", at = @At("HEAD"))
-    private void coreprotect$onSignUpdate(UpdateSignC2SPacket packet, List<FilteredMessage> signText, CallbackInfo ci) {
+    @Inject(method = "onUpdateSign", at = @At("HEAD"))
+    private void coreprotect$onSignUpdate(UpdateSignC2SPacket packet, CallbackInfo ci) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null || !mod.config().logging.signEdit) return;
         ServerPlayerEntity player = ((ServerPlayNetworkHandler) (Object) this).getPlayer();
         if (player == null) return;
-        String lines = BlockStateUtil.signLinesToJson(packet.getText());
+        String lines = BlockStateUtil.signLinesToJson(packet.getText(), packet.isFront());
         if (lines == null) return;
         BlockPos pos = packet.getPos();
         mod.database().insertSignAsync(new DatabaseManager.SignLog(

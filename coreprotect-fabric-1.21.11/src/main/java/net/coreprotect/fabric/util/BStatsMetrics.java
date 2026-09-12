@@ -52,9 +52,10 @@ public final class BStatsMetrics {
     private final String endpoint;
 
     public BStatsMetrics(CoreProtectFabric mod) {
-        // bStats opt-out config: config/bstats/config.txt
+        // bStats opt-out config: config/bstats/config.txt (official bStats file: config.yml)
         Path file = FabricLoader.getInstance().getConfigDir().resolve("bstats").resolve("config.txt");
-        String[] cfg = loadConfig(file);
+        Path yml = FabricLoader.getInstance().getConfigDir().resolve("bstats").resolve("config.yml");
+        String[] cfg = loadConfig(file, yml);
         this.serverUuid = cfg[0];
         boolean fileEnabled = Boolean.parseBoolean(cfg[1]);
         this.logFailedRequests = Boolean.parseBoolean(cfg[2]);
@@ -91,7 +92,7 @@ public final class BStatsMetrics {
     }
 
     public void shutdown() {
-        scheduler.shutdown();
+        scheduler.shutdownNow();
     }
 
     private void submitData() {
@@ -175,17 +176,21 @@ public final class BStatsMetrics {
     }
 
     /**
-     * Loads (or creates) {@code config/bstats/config.txt}. Returns
+     * Loads {@code config/bstats/config.txt} and honours the official bStats opt-out file
+     * {@code config/bstats/config.yml}. Returns
      * {@code [serverUuid, enabled, logFailedRequests, logSentData, logResponseStatusText]}.
+     * The file is only (re)written when it is missing, so a manual opt-out survives.
      */
-    private static String[] loadConfig(Path file) {
+    private static String[] loadConfig(Path file, Path yml) {
         String uuid = UUID.randomUUID().toString();
         String enabled = "true";
         String logFailed = "false";
         String logSent = "false";
         String logResponse = "false";
+        boolean exists = false;
         try {
             if (Files.exists(file)) {
+                exists = true;
                 for (String line : Files.readAllLines(file)) {
                     String s = line.trim();
                     if (s.startsWith("#") || !s.contains(":")) continue;
@@ -203,21 +208,35 @@ public final class BStatsMetrics {
                     }
                 }
             }
-            String content = "# bStats collects some basic information for the mod author, like how\n"
-                    + "# many people are using their mod and their total player count. It's\n"
-                    + "# recommended to keep bStats enabled, but if you're not comfortable with\n"
-                    + "# this, you can turn this setting off. There is no performance penalty\n"
-                    + "# associated with having metrics enabled, and data sent to bStats is fully\n"
-                    + "# anonymous.\n"
-                    + "enabled: " + enabled + "\n"
-                    + "serverUuid: " + uuid + "\n"
-                    + "logFailedRequests: " + logFailed + "\n"
-                    + "logSentData: " + logSent + "\n"
-                    + "logResponseStatusText: " + logResponse + "\n";
-            if (file.getParent() != null) {
-                Files.createDirectories(file.getParent());
+            // the official bStats file (config.yml, written by the bStats library) must be
+            // respected as well: "enabled: false" there means the admin opted out
+            if (Files.exists(yml)) {
+                for (String line : Files.readAllLines(yml)) {
+                    String s = line.trim();
+                    if (!s.startsWith("enabled")) continue;
+                    int idx = s.indexOf(':');
+                    if (idx < 0) continue;
+                    enabled = s.substring(idx + 1).trim();
+                    break;
+                }
             }
-            Files.writeString(file, content, StandardCharsets.UTF_8);
+            if (!exists) {
+                String content = "# bStats collects some basic information for the mod author, like how\n"
+                        + "# many people are using their mod and their total player count. It's\n"
+                        + "# recommended to keep bStats enabled, but if you're not comfortable with\n"
+                        + "# this, you can turn this setting off. There is no performance penalty\n"
+                        + "# associated with having metrics enabled, and data sent to bStats is fully\n"
+                        + "# anonymous.\n"
+                        + "enabled: " + enabled + "\n"
+                        + "serverUuid: " + uuid + "\n"
+                        + "logFailedRequests: " + logFailed + "\n"
+                        + "logSentData: " + logSent + "\n"
+                        + "logResponseStatusText: " + logResponse + "\n";
+                if (file.getParent() != null) {
+                    Files.createDirectories(file.getParent());
+                }
+                Files.writeString(file, content, StandardCharsets.UTF_8);
+            }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to read bStats config", e);
         }

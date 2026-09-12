@@ -6,6 +6,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -30,6 +31,9 @@ public final class UpdateChecker {
 
     private volatile String latestVersion;
     private volatile String latestUrl;
+    /** Set when the update source reports that the project/URL does not exist: stops the retries. */
+    private volatile boolean sourceMissing;
+    private ScheduledFuture<?> task;
 
     public boolean available() {
         return latestVersion != null;
@@ -52,16 +56,19 @@ public final class UpdateChecker {
         }
         long interval = TimeUnit.HOURS.toMillis(mod.config().updateCheck.intervalHours);
         scheduler.schedule(this::check, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS);
-        scheduler.scheduleAtFixedRate(this::check, TimeUnit.SECONDS.toMillis(30) + interval, interval, TimeUnit.MILLISECONDS);
+        task = scheduler.scheduleAtFixedRate(this::check, TimeUnit.SECONDS.toMillis(30) + interval, interval, TimeUnit.MILLISECONDS);
     }
 
     public void shutdown() {
-        scheduler.shutdown();
+        if (task != null) {
+            task.cancel(true); // scheduleAtFixedRate keeps running after a plain shutdown()
+        }
+        scheduler.shutdownNow();
     }
 
     private void check() {
         CoreProtectFabric mod = CoreProtectFabric.instance();
-        if (mod == null || mod.server() == null) return;
+        if (mod == null || mod.server() == null || sourceMissing) return;
         String slug = mod.config().updateCheck.slug;
         String custom = mod.config().updateCheck.url;
         String url = (custom != null && !custom.isBlank())
@@ -72,7 +79,22 @@ public final class UpdateChecker {
             connection.setConnectTimeout(15000);
             connection.setReadTimeout(15000);
             connection.setRequestProperty("User-Agent",
-                    "coreprotect-fabric/" + CoreProtectFabric.MOD_VERSION + " (Minecraft 1.21; Fabric)");
+                    "coreprotect-fabric/" + CoreProtectFabric.MOD_VERSION + " (Fabric)");
+            int status = connection.getResponseCode();
+            if (status == 404 || status == 410) {
+                // the project simply does not exist (yet): report once instead of warning
+                // on every interval for the rest of the server's life
+                sourceMissing = true;
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Update check disabled: {} returned HTTP {}. "
+                        + "Set updateCheck.slug/url in the config once the mod is published.", url, status);
+                connection.disconnect();
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Update check failed: HTTP {} from {}", status, url);
+                connection.disconnect();
+                return;
+            }
             StringBuilder body = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
@@ -84,23 +106,39 @@ public final class UpdateChecker {
             }
             JsonArray versions = JsonParser.parseString(body.toString()).getAsJsonArray();
             String minecraft = SharedConstants.getGameVersion().getName();
+            String newest = null;
+            JsonObject newestEntry = null;
+            // scan every matching entry instead of stopping at the first: Modrinth returns
+            // newest-first, but a pre-release of a lower version could otherwise hide a
+            // genuinely newer stable release
             for (JsonElement element : versions) {
                 JsonObject v = element.getAsJsonObject();
                 if (!contains(v.get("game_versions"), minecraft) || !contains(v.get("loaders"), "fabric")) {
                     continue;
                 }
-                String number = v.get("version_number").getAsString();
-                if (compareVersions(number, CoreProtectFabric.MOD_VERSION) > 0) {
-                    latestVersion = number;
-                    latestUrl = fileUrl(v, slug, number);
-                    CoreProtectFabric.LOGGER.info("[CoreProtect] A new version of CoreProtect Fabric is available: v{} "
-                            + "(current: v{}). Download: {}", number, CoreProtectFabric.MOD_VERSION, latestUrl);
+                JsonElement numberElement = v.get("version_number");
+                if (numberElement == null || !numberElement.isJsonPrimitive()) continue;
+                String number = numberElement.getAsString();
+                if (isPreRelease(number) && !isPreRelease(CoreProtectFabric.MOD_VERSION)) continue;
+                if (newest == null || compareVersions(number, newest) > 0) {
+                    newest = number;
+                    newestEntry = v;
                 }
-                break; // Modrinth returns newest first; the first matching entry decides.
+            }
+            if (newest != null && compareVersions(newest, CoreProtectFabric.MOD_VERSION) > 0) {
+                latestVersion = newest;
+                latestUrl = fileUrl(newestEntry, slug, newest);
+                CoreProtectFabric.LOGGER.info("[CoreProtect] A new version of CoreProtect Fabric is available: v{} "
+                        + "(current: v{}). Download: {}", newest, CoreProtectFabric.MOD_VERSION, latestUrl);
             }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.warn("[CoreProtect] Update check failed: {}", e.toString());
         }
+    }
+
+    /** A version carrying a pre-release suffix such as {@code 1.9.0-beta.1}. */
+    private static boolean isPreRelease(String version) {
+        return version != null && version.matches(".*[A-Za-z].*");
     }
 
     private static boolean contains(JsonElement element, String value) {

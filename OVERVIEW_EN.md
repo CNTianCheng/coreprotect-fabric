@@ -46,7 +46,7 @@ After `/co inspect`: **left-click** a block to view its history, **right-click**
 - `/co purge t:<time>` prunes old data, `/co reload` hot-reloads, `/co status` shows statistics
 - **Four languages**: English / 简体中文 / 繁體中文 / 日本語, automatically following the client language, with manual switching via `/co language <code>` (persisted per player)
 
-## 1.21-Build Enhancements (v1.8.1 Flagship)
+## 1.21-Build Enhancements (v1.8.2 Flagship)
 
 The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared feature set:
 
@@ -65,6 +65,7 @@ The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared featu
 | v1.7.2 | bStats now reports the player count (custom "players" single-line chart; pair it with a players chart on the bstats.org service page to display online players) |
 | v1.8.0 | Crash protection: per-commit WAL fsync (synchronous=full), unclean-shutdown detection with startup quick_check, periodic WAL checkpoints |
 | v1.8.1 | Power-loss protection: periodic hot backups (VACUUM INTO, default every 6 hours), automatic restore from the backup when corruption is detected (original kept aside), reader connections reopen on restore |
+| v1.8.2 | **Bug-fix release for all three full-feature builds** (1.21 / 1.21.11 / 26.1.2): broken `#fire` logging, sign front/back faces, phantom item drop/pickup rows, rollback safety limit and container undo, `/co undo` reverting an unrelated operation, CoreProtect-compatible `a:container` and friends, `e:`/radius/case-insensitive filters, crash-marker and shutdown ordering, bStats opt-out and update-check spam (see each release page for the full list) |
 
 ## Version Matrix (16 Builds)
 
@@ -72,7 +73,7 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 
 | Minecraft | Mod version | Jar file | Project directory | Java |
 |---|---|---|---|---|
-| 1.21 | 1.8.1 (flagship) | `coreprotect-fabric-1.21-1.8.1.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.8.2 (flagship) | `coreprotect-fabric-1.21-1.8.2.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |
@@ -83,13 +84,13 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.8.1 | `coreprotect-fabric-1.21.11-1.8.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.8.2 | `coreprotect-fabric-1.21.11-1.8.2.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.8.1 | `coreprotect-fabric-26.1.2-1.8.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.8.2 | `coreprotect-fabric-26.1.2-1.8.2.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. **1.21, 1.21.11 and 26.1.2 all ship the complete v1.8.1 feature set** (identical commands, logging coverage, colors, database schema and crash/power-loss protection); the remaining builds carry the v1.0.0 core feature set. Each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
+> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. **1.21, 1.21.11 and 26.1.2 all ship the complete v1.8.2 feature set** (identical commands, logging coverage, colors, database schema and crash/power-loss protection); the remaining builds carry the v1.0.0 core feature set. Each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
 
 ## Installation
 

@@ -173,8 +173,10 @@ public final class CoCommand {
 
     private static Token token(SuggestionsBuilder builder) {
         String input = builder.getInput();
-        String remaining = builder.getRemaining();
-        int cursor = input.length() - remaining.length();
+        // brigadier builds suggestions for the end of the input; using
+        // input.length() - remaining.length() here always yielded builder.getStart(),
+        // so the token was always empty and key/player completion never matched
+        int cursor = input.length();
         int start = Math.max(builder.getStart(), 0);
         if (start > cursor) start = cursor;
         String argText = input.substring(start, cursor);
@@ -370,9 +372,14 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        // Like the CoreProtect plugin, u: is optional: a rollback/restore may target every
+        // user within a time/radius/block filter. Requiring no filter at all is still refused.
         if (c.user == null || c.user.isEmpty()) {
-            Messages.error(source, "coreprotect.error.missing_user");
-            return 0;
+            boolean filtered = c.time > 0 || c.radius > 0 || c.block != null || c.exclude != null;
+            if (!filtered) {
+                Messages.error(source, "coreprotect.error.missing_user");
+                return 0;
+            }
         }
         if (c.radius > 0 && c.center == null) {
             c.center = source.getPlayer() != null ? source.getPlayer().getBlockPos() : BlockPos.ORIGIN;
@@ -530,6 +537,10 @@ public final class CoCommand {
         }
         // piston pushing a wool block (in the air, so the push always succeeds) -> #piston records
         BlockPos pistonBase = CoreProtectFabric.instance().server().getSpawnPoint().getPos().add(0, 1, 20);
+        // clear the pushed block and its destination first: leftovers from an earlier test
+        // (an old piston head, for example) would make the push fail
+        world.setBlockState(pistonBase.north(2), net.minecraft.block.Blocks.AIR.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
+        world.setBlockState(pistonBase.north(), net.minecraft.block.Blocks.AIR.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
         world.setBlockState(pistonBase, net.minecraft.block.Blocks.PISTON.getDefaultState()
                 .with(net.minecraft.block.PistonBlock.FACING, net.minecraft.util.math.Direction.NORTH), net.minecraft.block.Block.NOTIFY_ALL);
         world.setBlockState(pistonBase.north(), net.minecraft.block.Blocks.WHITE_WOOL.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
