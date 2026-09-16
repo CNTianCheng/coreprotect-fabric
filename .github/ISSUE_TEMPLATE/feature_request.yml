@@ -1,0 +1,41 @@
+name: 功能建议 / Feature request
+description: 建议新增记录类型、命令或行为改进
+title: "[Feature] 简短描述建议"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认 Issues 中没有相同的建议。
+        Please check that a similar request does not already exist.
+  - type: input
+    id: mc_version
+    attributes:
+      label: Minecraft 版本 / Minecraft version
+      placeholder: 例如 1.21
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题 / What problem does this solve?
+      placeholder: 例如：末影人搬运方块没有记录，无法回滚 …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的行为 / Proposed behaviour
+      description: 希望记录什么、用什么命令查询、输出大概是什么样
+    validations:
+      required: true
+  - type: input
+    id: coreprotect
+    attributes:
+      label: CoreProtect 插件的对应行为（可选）
+      description: 如果你用过原插件，它在这种情况下的表现是什么
+      placeholder: 例如：/co lookup u:#enderman 会显示 …
+  - type: textarea
+    id: more
+    attributes:
+      label: 其他补充 / Additional context

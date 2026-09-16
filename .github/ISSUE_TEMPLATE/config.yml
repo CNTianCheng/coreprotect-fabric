@@ -1,1 +1,11 @@
 blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 / Security vulnerability
+    url: https://github.com/CNTianCheng/coreprotect-fabric/security/advisories/new
+    about: 请勿公开提交安全问题，请使用私密报告通道 / Please report security issues privately
+  - name: 安装与使用文档 / Documentation
+    url: https://github.com/CNTianCheng/coreprotect-fabric/blob/main/README.md
+    about: 安装步骤、命令列表与配置说明 / Install steps, command list and configuration
+  - name: 贡献指南 / Contributing guide
+    url: https://github.com/CNTianCheng/coreprotect-fabric/blob/main/CONTRIBUTING.md
+    about: 提交代码、翻译或文档前请先阅读 / Read this before sending code, translations or docs

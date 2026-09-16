@@ -48,7 +48,14 @@ cd coreprotect-fabric-1.21
 
 ## 🐛 提交 Bug
 
-请使用 [Bug 报告模板](https://github.com/CNTianCheng/coreprotect-fabric/issues/new/choose)（中文），包含：游戏版本、模组版本、复现步骤、`/co status` 输出与服务器日志片段。
+请使用 [Bug 报告模板](https://github.com/CNTianCheng/coreprotect-fabric/issues/new/choose)（中文/English），包含：游戏版本、模组版本、复现步骤、`/co status` 输出与服务器日志片段。
+
+## 🤝 参与贡献
+
+- [贡献指南 CONTRIBUTING.md](./CONTRIBUTING.md) —— 改哪个目录、如何自测、必须遵守的规则
+- [行为准则 CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) —— Contributor Covenant 2.1（中英）
+- [安全策略 SECURITY.md](./SECURITY.md) —— 漏洞请通过 **Security → Report a vulnerability** 私密提交，勿开公开 Issue
+- [更新日志 CHANGELOG.md](./CHANGELOG.md) —— 各版本改动摘要
 
 ## 📄 开源许可
 
