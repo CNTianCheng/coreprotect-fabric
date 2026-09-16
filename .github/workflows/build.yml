@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.project }} (Java ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: coreprotect-fabric-1.21
+            java: '21'
+          - project: coreprotect-fabric-1.21.11
+            java: '21'
+          - project: coreprotect-fabric-26.1.2
+            java: '25'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        working-directory: ${{ matrix.project }}
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon --console=plain
+
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project }}-jars
+          path: ${{ matrix.project }}/build/libs/*.jar
+          if-no-files-found: warn
+
+  scripts-ascii:
+    name: Tool scripts are ASCII-only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Windows PowerShell reads BOM-less .ps1 files as ANSI, so a Chinese literal inside a
+      # script silently turns into mojibake (this once corrupted release bodies on GitHub).
+      - name: Reject non-ASCII bytes in shell scripts
+        run: |
+          if grep -rlP '[^\x00-\x7F]' --include='*.ps1' --include='*.sh' --include='*.bat' . ; then
+            echo "::error::Non-ASCII text found in a script. Keep scripts pure ASCII and read translated strings from UTF-8 data files."
+            exit 1
+          fi
+          echo "All scripts are ASCII-only."
