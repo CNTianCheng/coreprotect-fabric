@@ -25,7 +25,7 @@ jobs:
             java: '25'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK ${{ matrix.java }}
         uses: actions/setup-java@v4
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Windows PowerShell reads BOM-less .ps1 files as ANSI, so a Chinese literal inside a
       # script silently turns into mojibake (this once corrupted release bodies on GitHub).
