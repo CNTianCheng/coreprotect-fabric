@@ -1,0 +1,19 @@
+{
+  "slug": "coreprotect-fabric",
+  "title": "CoreProtect Fabric",
+  "description": "CoreProtect-style block, container and inventory logging for Fabric servers: rollback, restore, lookup, inspect and purge, backed by a compact SQLite database.",
+  "categories": ["management", "utility", "storage"],
+  "additional_categories": ["game-mechanics"],
+  "project_type": "mod",
+  "status": "approved",
+  "license_id": "MIT",
+  "client_side": "unsupported",
+  "server_side": "required",
+  "source_url": "https://github.com/CNTianCheng/coreprotect-fabric",
+  "issues_url": "https://github.com/CNTianCheng/coreprotect-fabric/issues",
+  "wiki_url": "https://github.com/CNTianCheng/coreprotect-fabric/blob/main/OVERVIEW_EN.md",
+  "body_file": "body.md",
+  "icon_file": "icon.png",
+  "changelog_file": "changelog-1.9.0.md",
+  "dependency_slugs": ["fabric-api"]
+}

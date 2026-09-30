@@ -1,0 +1,107 @@
+{
+  "comment": "Stale-version fixes for the root docs after the v1.9.0 release. Applied by apply-doc-edits.ps1, which asserts each find string occurs exactly <count> times before writing UTF-8 back.",
+  "edits": [
+    {
+      "file": "OVERVIEW.md",
+      "find": "## 1.21 版增强功能（v1.8.2 旗舰版）",
+      "replace": "## 1.21 版增强功能（v1.9.0 旗舰版）",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "bStats 退出与更新检查刷屏等（详见各版本 Release 说明） |",
+      "replace": "bStats 退出与更新检查刷屏等（详见各版本 Release 说明） |\n| v1.9.0 | 数据库体积大幅压缩（v3 schema）：user/world/action 与方块状态全部字典化，每张日志表仅保留 2 个索引，41.7 万行实测 46.38MB → 24.32MB（−47.6%，每行 116.6 → 61.2 字节）；旧库首次启动自动迁移并保留 `coreprotect.db.bak-v2` 备份 |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 1.8.2（旗舰） | `coreprotect-fabric-1.21-1.8.2.jar` |",
+      "replace": "| 1.9.0（旗舰） | `coreprotect-fabric-1.21-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 1.21.11 | 1.8.2 | `coreprotect-fabric-1.21.11-1.8.2.jar` |",
+      "replace": "| 1.21.11 | 1.9.0 | `coreprotect-fabric-1.21.11-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 26.1.2 | 1.8.2 | `coreprotect-fabric-26.1.2-1.8.2.jar` |",
+      "replace": "| 26.1.2 | 1.9.0 | `coreprotect-fabric-26.1.2-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "**1.21、1.21.11、26.1.2 均为 v1.8.2 完整功能版**",
+      "replace": "**1.21、1.21.11、26.1.2 均为 v1.9.0 完整功能版**",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "`co_user`（1.21 版另有 `co_item` / `co_sign`）",
+      "replace": "`co_user`，以及 v3 起新增的字典表 `co_state` / `co_name` / `co_world` / `co_action`（三个完整功能版另有 `co_item` / `co_sign`）",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "- 1.21 版已额外记录漏斗（`#hopper`）、投掷器/发射器（`#dropper`/`#dispenser`）、掉落物与告示牌编辑；**其余版本暂未包含**这四类记录，且暂无 `/co i` 简写、权限组、`/co online`、数据保存限制（可按需将 1.21 版改动移植）",
+      "replace": "- 三个完整功能版（1.21 / 1.21.11 / 26.1.2）均已包含漏斗（`#hopper`）、投掷器/发射器（`#dropper`/`#dispenser`）、掉落物与告示牌编辑记录，以及 `/co i` 简写、权限组、`/co online`、数据保存限制；其余版本为 v1.0.0 核心功能集，不含上述内容",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "## 1.21-Build Enhancements (v1.8.2 Flagship)",
+      "replace": "## 1.21-Build Enhancements (v1.9.0 Flagship)",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "bStats opt-out and update-check spam (see each release page for the full list) |",
+      "replace": "bStats opt-out and update-check spam (see each release page for the full list) |\n| v1.9.0 | Much smaller database (schema v3): user/world/action and block states are dictionary-encoded and every log table keeps just 2 indexes — measured 46.38MB -> 24.32MB on 417k rows (-47.6%, 116.6 -> 61.2 bytes per row); existing databases migrate automatically on first start and keep a `coreprotect.db.bak-v2` backup |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 1.8.2 (flagship) | `coreprotect-fabric-1.21-1.8.2.jar` |",
+      "replace": "| 1.9.0 (flagship) | `coreprotect-fabric-1.21-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 1.21.11 | 1.8.2 | `coreprotect-fabric-1.21.11-1.8.2.jar` |",
+      "replace": "| 1.21.11 | 1.9.0 | `coreprotect-fabric-1.21.11-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 26.1.2 | 1.8.2 | `coreprotect-fabric-26.1.2-1.8.2.jar` |",
+      "replace": "| 26.1.2 | 1.9.0 | `coreprotect-fabric-26.1.2-1.9.0.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "**1.21, 1.21.11 and 26.1.2 all ship the complete v1.8.2 feature set**",
+      "replace": "**1.21, 1.21.11 and 26.1.2 all ship the complete v1.9.0 feature set**",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "(the 1.21 build adds `co_item` / `co_sign`)",
+      "replace": "plus the dictionary tables added in v3: `co_state` / `co_name` / `co_world` / `co_action` (the three full-feature builds also add `co_item` / `co_sign`)",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "- The 1.21 build additionally logs hoppers (`#hopper`), droppers/dispensers (`#dropper`/`#dispenser`), item drops, and sign edits; **the other builds do not include** these four record types yet, nor the `/co i` shorthand, permission groups, `/co online`, or the data-retention limit (the 1.21 changes can be ported on demand)",
+      "replace": "- All three full-feature builds (1.21 / 1.21.11 / 26.1.2) log hoppers (`#hopper`), droppers/dispensers (`#dropper`/`#dispenser`), item drops and sign edits, and include the `/co i` shorthand, permission groups, `/co online` and the data-retention limit; the remaining builds carry the v1.0.0 core feature set without them",
+      "count": 1
+    },
+    {
+      "file": "SECURITY.md",
+      "find": "**1.8.2**",
+      "replace": "**1.9.0**",
+      "count": 6
+    }
+  ]
+}

@@ -54,6 +54,7 @@ replay_pid*
 apikey.txt
 github-recovery-codes.txt
 *.recovery-codes*
+.build-tools/modrinth/token.txt
 启动.cmd
 
 # ------------------------------------------------------------------
