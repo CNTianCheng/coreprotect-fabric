@@ -18,6 +18,12 @@
 
     Idempotent: an existing project is updated instead of recreated, and a version
     whose version_number is already published is skipped unless -Force is given.
+
+    The project already exists and was created by the repository owner, who owns its
+    icon, description and body. Nothing about the project is modified unless
+    -UpdateProject is passed, and the icon is NEVER replaced unless -SetIcon is
+    passed explicitly - uploading versions is the default and only intended action.
+
     Windows PowerShell 5.1 has no -Form on Invoke-RestMethod, hence the HttpClient
     multipart uploads below.
 #>
@@ -26,7 +32,9 @@ param(
     [string]$Token,
     [string]$Root,
     [switch]$DryRun,
-    [switch]$NoProjectUpdate,
+    [switch]$UpdateProject,
+    [switch]$SetIcon,
+    [switch]$DumpPayload,
     [switch]$Force
 )
 
@@ -84,13 +92,26 @@ function Invoke-Api {
     return (Invoke-RestMethod @params)
 }
 
+# Upload one multipart request: a `data` JSON field plus one file field per $Files entry.
+#
+# This deliberately recreates the exact request shape that was verified to upload
+# successfully (probe6.ps1): a fresh HttpClient per request, the data part added first,
+# no explicit Content-Type on the file parts, and the response disposed. The earlier
+# shape (shared client, explicit application/octet-stream) made api.modrinth.com answer
+# every upload of a real project with the actix framework's plain-text HTTP 405
+# "Request did not meet this resource's requirements." instead of creating the version,
+# even though the identical payload uploaded fine through this shape. Do not "simplify"
+# it back without re-testing a real upload.
 function Send-Multipart {
     param(
-        [System.Net.Http.HttpClient]$Client,
         [string]$Path,
         [string]$Json,
         [hashtable]$Files
     )
+    $client = New-Object System.Net.Http.HttpClient
+    $client.Timeout = [TimeSpan]::FromMinutes(60)
+    [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('Authorization', $Token)
+    [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('User-Agent', $ua)
     $form = New-Object System.Net.Http.MultipartFormDataContent
     $streams = @()
     try {
@@ -103,15 +124,17 @@ function Send-Multipart {
             $stream = [System.IO.File]::OpenRead($path)
             $streams += $stream
             $content = New-Object System.Net.Http.StreamContent($stream)
-            $content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
             $form.Add($content, $field, [System.IO.Path]::GetFileName($path))
         }
-        $response = $Client.PostAsync("$api$Path", $form).Result
+        $response = $client.PostAsync("$api$Path", $form).Result
         $text = $response.Content.ReadAsStringAsync().Result
-        return @{ Status = [int]$response.StatusCode; Text = $text }
+        $status = [int]$response.StatusCode
+        $response.Dispose()
+        return @{ Status = $status; Text = $text }
     } finally {
         foreach ($stream in $streams) { $stream.Dispose() }
         $form.Dispose()
+        $client.Dispose()
     }
 }
 
@@ -238,7 +261,7 @@ try {
     $user = Invoke-Api -Method 'Get' -Path '/user'
     Write-Host "token    : $($user.username) (id $($user.id))"
 } catch {
-    throw "the token was rejected by /user ($(Get-ErrorText $_)). A personal access token with PROJECT_CREATE, PROJECT_WRITE and VERSION_CREATE is required."
+    Write-Host "token    : the /user check failed ($(Get-ErrorText $_)) - continuing anyway, the write calls below report real scope problems"
 }
 
 # ---------------------------------------------------------------- project
@@ -266,7 +289,7 @@ if (-not $existing) {
     $createBody = [ordered]@{ slug = $project.slug; project_type = $project.project_type }
     foreach ($key in $projectBody.Keys) { $createBody[$key] = $projectBody[$key] }
     Write-Host "creating project $($project.slug) ..."
-    $result = Send-Multipart -Client $client -Path '/project' -Json (To-JsonText $createBody) -Files @{ icon = $iconPath }
+    $result = Send-Multipart -Path '/project' -Json (To-JsonText $createBody) -Files @{ icon = $iconPath }
     if ($result.Status -lt 200 -or $result.Status -ge 300) {
         throw "project creation failed (HTTP $($result.Status)): $($result.Text)"
     }
@@ -276,7 +299,7 @@ if (-not $existing) {
 } else {
     $projectId = $existing.id
     Write-Host "project exists: $($existing.slug) ($projectId) - $($existing.versions.Count) version(s)"
-    if (-not $NoProjectUpdate) {
+    if ($UpdateProject) {
         Write-Host 'updating project fields and body ...'
         try {
             $patched = Invoke-Api -Method 'Patch' -Path "/project/$projectId" -Json (To-JsonText $projectBody)
@@ -287,8 +310,14 @@ if (-not $existing) {
             $patched = Invoke-Api -Method 'Patch' -Path "/project/$projectId" -Json (To-JsonText $minimal)
             Write-Host "updated  : $($patched.slug)"
         }
+    } else {
+        Write-Host 'project  : left untouched (description, body, categories, icon)'
+    }
+    if ($SetIcon) {
         $icon = Send-MultipartPatch -Client $client -Path "/project/$projectId/icon" -Files @{ icon = $iconPath }
         if ($icon.Status -ge 200 -and $icon.Status -lt 300) { Write-Host 'icon     : updated' } else { Write-Host "icon     : skipped (HTTP $($icon.Status))" }
+    } else {
+        Write-Host 'icon     : left untouched (the owner set it on modrinth.com)'
     }
 }
 
@@ -316,18 +345,42 @@ try {
 }
 $publishedNumbers = @($published | ForEach-Object { $_.version_number })
 
+# All three maintained builds share one version_number (1.9.0) and differ only by game
+# version, so "already published" has to key on version_number AND game_versions -
+# matching on the number alone would skip every build after the first one.
+$publishedKeys = @{}
+foreach ($p in $published) {
+    $games = (@($p.game_versions) | Sort-Object) -join ','
+    $publishedKeys["$($p.version_number)|$games"] = $p.id
+}
+
 $summary = @()
+$dumpIndex = 1
 foreach ($v in $versions) {
-    if (($publishedNumbers -contains $v.version_number) -and -not $Force) {
-        Write-Host "skip     : $($v.version_number) is already published"
+    $wantGames = (@($v.game_versions) | Sort-Object) -join ','
+    $key = "$($v.version_number)|$wantGames"
+    if ($publishedKeys.ContainsKey($key) -and -not $Force) {
+        Write-Host "skip     : $($v.version_number) for $(($v.game_versions -join ',')) is already published ($($publishedKeys[$key]))"
         $summary += [pscustomobject]@{ Version = $v.version_number; Result = 'already published' }
         continue
     }
 
     $jarPath = Join-Path $Root ($v.file -replace '/', '\')
     $files = @{ file = $jarPath }
+    # Payload contract, established empirically against api.modrinth.com (the docs
+    # are behind the deployed API here):
+    #   * The API wants version_title, NOT name, and answers 400 "missing field" for
+    #     each of version_title, dependencies and featured that is absent.
+    #   * dependencies must be present even when it is empty, and featured is required.
+    #   * Sending status or environment makes the deployed API reply with the actix
+    #     framework's plain-text HTTP 405 "Request did not meet this resource's
+    #     requirements." (no labrinth JSON envelope) and no version is created. Both
+    #     are simply omitted: the server then applies the same defaults the project
+    #     owner already uses - status "listed" and environment "dedicated_server_only".
+    #   * game_versions/loaders/file_parts must serialize as JSON arrays; PowerShell
+    #     unrolls one-element arrays, so they are always re-wrapped with @(...).
     $payload = [ordered]@{
-        name           = $v.name
+        version_title  = $v.name
         version_number = $v.version_number
         changelog      = $changelogText
         game_versions  = @($v.game_versions)
@@ -336,10 +389,9 @@ foreach ($v in $versions) {
         project_id     = $projectId
         file_parts     = @('file')
         primary_file   = 'file'
-        status         = 'listed'
+        featured       = $false
+        dependencies   = $dependencies
     }
-    if ($v.environment) { $payload['environment'] = $v.environment }
-    if ($dependencies.Count -gt 0) { $payload['dependencies'] = $dependencies }
     if ($v.sources) {
         $srcPath = Join-Path $Root ($v.sources -replace '/', '\')
         if (Test-Path -LiteralPath $srcPath) {
@@ -349,15 +401,18 @@ foreach ($v in $versions) {
         }
     }
 
+    if ($DumpPayload) {
+        $dumpPath = Join-Path $here ("payload-{0}.json" -f $dumpIndex)
+        [System.IO.File]::WriteAllText($dumpPath, (To-JsonText $payload), (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "dumped   : $dumpPath ($((To-JsonText $payload).Length) chars)"
+        $dumpIndex++
+        continue
+    }
+
     Write-Host "uploading: $($v.version_number) <- $(Split-Path -Leaf $jarPath)"
-    $result = Send-Multipart -Client $client -Path '/version' -Json (To-JsonText $payload) -Files $files
+    $result = Send-Multipart -Path '/version' -Json (To-JsonText $payload) -Files $files
     if ($result.Status -lt 200 -or $result.Status -ge 300) {
         Write-Host "  HTTP $($result.Status): $($result.Text)"
-        if ($payload['environment']) {
-            Write-Host '  retrying without the environment field ...'
-            $payload.Remove('environment')
-            $result = Send-Multipart -Client $client -Path '/version' -Json (To-JsonText $payload) -Files $files
-        }
     }
     if ($result.Status -lt 200 -or $result.Status -ge 300) {
         Write-Host "  FAILED (HTTP $($result.Status)): $($result.Text)"
@@ -367,6 +422,11 @@ foreach ($v in $versions) {
     $publishedVersion = $result.Text | ConvertFrom-Json
     Write-Host "  ok       : $($publishedVersion.id)"
     $summary += [pscustomobject]@{ Version = $v.version_number; Result = 'published' }
+}
+
+if ($DumpPayload) {
+    Write-Host 'PAYLOAD_DUMP_DONE'
+    return
 }
 
 # ---------------------------------------------------------------- report

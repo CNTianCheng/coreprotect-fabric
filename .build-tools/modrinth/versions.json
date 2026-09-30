@@ -1,32 +1,29 @@
 [
   {
-    "name": "CoreProtect Fabric 1.9.0 (Minecraft 1.21)",
-    "version_number": "1.9.0+1.21",
+    "name": "CoreProtect-Fabric 1.9.0",
+    "version_number": "1.9.0",
     "game_versions": ["1.21"],
     "loaders": ["fabric"],
     "version_type": "release",
-    "environment": "server_only",
-    "file": "coreprotect-fabric-1.21/build/libs/coreprotect-fabric-1.21-1.9.0.jar",
-    "sources": "coreprotect-fabric-1.21/build/libs/coreprotect-fabric-1.21-1.9.0-sources.jar"
+    "environment": "dedicated_server_only",
+    "file": "coreprotect-fabric-1.21/build/libs/coreprotect-fabric-1.21-1.9.0.jar"
   },
   {
-    "name": "CoreProtect Fabric 1.9.0 (Minecraft 1.21.11)",
-    "version_number": "1.9.0+1.21.11",
+    "name": "CoreProtect-Fabric 1.9.0",
+    "version_number": "1.9.0",
     "game_versions": ["1.21.11"],
     "loaders": ["fabric"],
     "version_type": "release",
-    "environment": "server_only",
-    "file": "coreprotect-fabric-1.21.11/build/libs/coreprotect-fabric-1.21.11-1.9.0.jar",
-    "sources": "coreprotect-fabric-1.21.11/build/libs/coreprotect-fabric-1.21.11-1.9.0-sources.jar"
+    "environment": "dedicated_server_only",
+    "file": "coreprotect-fabric-1.21.11/build/libs/coreprotect-fabric-1.21.11-1.9.0.jar"
   },
   {
-    "name": "CoreProtect Fabric 1.9.0 (Minecraft 26.1.2)",
-    "version_number": "1.9.0+26.1.2",
+    "name": "CoreProtect-Fabric 1.9.0",
+    "version_number": "1.9.0",
     "game_versions": ["26.1.2"],
     "loaders": ["fabric"],
     "version_type": "release",
-    "environment": "server_only",
-    "file": "coreprotect-fabric-26.1.2/build/libs/coreprotect-fabric-26.1.2-1.9.0.jar",
-    "sources": "coreprotect-fabric-26.1.2/build/libs/coreprotect-fabric-26.1.2-1.9.0-sources.jar"
+    "environment": "dedicated_server_only",
+    "file": "coreprotect-fabric-26.1.2/build/libs/coreprotect-fabric-26.1.2-1.9.0.jar"
   }
 ]
