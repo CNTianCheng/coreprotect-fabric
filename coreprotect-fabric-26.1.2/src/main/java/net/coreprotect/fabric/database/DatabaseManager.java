@@ -77,37 +77,45 @@ public final class DatabaseManager {
     public static final int CONTAINER_DEPOSIT = 0;
     public static final int CONTAINER_WITHDRAW = 1;
 
-    private static final String[] DDL_V2 = {
+    /** Schema v3: user/world/action strings live in dictionaries, indexed by integer id. */
+    private static final String[] DDL_V3 = {
             "CREATE TABLE IF NOT EXISTS co_state (id INTEGER PRIMARY KEY, state TEXT NOT NULL UNIQUE)",
-            "CREATE TABLE IF NOT EXISTS co_block (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, old_id INTEGER, new_id INTEGER, action TEXT NOT NULL, meta TEXT)",
-            "CREATE INDEX IF NOT EXISTS idx_block_pos ON co_block(wid, x, y, z)",
-            "CREATE INDEX IF NOT EXISTS idx_block_user ON co_block(user)",
-            "CREATE INDEX IF NOT EXISTS idx_block_time ON co_block(time)",
-            "CREATE TABLE IF NOT EXISTS co_container (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, data_id INTEGER, amount INTEGER NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_container_pos ON co_container(wid, x, y, z)",
-            "CREATE INDEX IF NOT EXISTS idx_container_user ON co_container(user)",
-            "CREATE INDEX IF NOT EXISTS idx_container_time ON co_container(time)",
-            "CREATE TABLE IF NOT EXISTS co_item (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, action TEXT NOT NULL, data_id INTEGER, amount INTEGER NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_item_pos ON co_item(wid, x, y, z)",
-            "CREATE INDEX IF NOT EXISTS idx_item_user ON co_item(user)",
-            "CREATE INDEX IF NOT EXISTS idx_item_time ON co_item(time)",
-            "CREATE TABLE IF NOT EXISTS co_sign (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_sign_pos ON co_sign(wid, x, y, z)",
-            "CREATE INDEX IF NOT EXISTS idx_sign_user ON co_sign(user)",
-            "CREATE INDEX IF NOT EXISTS idx_sign_time ON co_sign(time)",
-            "CREATE TABLE IF NOT EXISTS co_entity (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data_id INTEGER, action TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_entity_user ON co_entity(user)",
-            "CREATE INDEX IF NOT EXISTS idx_entity_time ON co_entity(time)",
-            "CREATE TABLE IF NOT EXISTS co_session (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, wid TEXT NOT NULL, action TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_session_time ON co_session(time)",
-            "CREATE INDEX IF NOT EXISTS idx_session_user ON co_session(user)",
-            "CREATE TABLE IF NOT EXISTS co_command (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, message TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_command_time ON co_command(time)",
-            "CREATE INDEX IF NOT EXISTS idx_command_user ON co_command(user)",
-            "CREATE TABLE IF NOT EXISTS co_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, user TEXT NOT NULL, message TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_chat_time ON co_chat(time)",
-            "CREATE INDEX IF NOT EXISTS idx_chat_user ON co_chat(user)",
+            "CREATE TABLE IF NOT EXISTS co_name (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE IF NOT EXISTS co_world (id INTEGER PRIMARY KEY, wid TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE IF NOT EXISTS co_action (id INTEGER PRIMARY KEY, action TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE IF NOT EXISTS co_block (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, old_id INTEGER, new_id INTEGER, action_id INTEGER, meta TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_block_pos ON co_block(wid_id, x, y, z)",
+            "CREATE INDEX IF NOT EXISTS idx_block_time ON co_block(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_container (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, data_id INTEGER, amount INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_container_pos ON co_container(wid_id, x, y, z)",
+            "CREATE INDEX IF NOT EXISTS idx_container_time ON co_container(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_item (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, action_id INTEGER, data_id INTEGER, amount INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_item_pos ON co_item(wid_id, x, y, z)",
+            "CREATE INDEX IF NOT EXISTS idx_item_time ON co_item(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_sign (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_sign_pos ON co_sign(wid_id, x, y, z)",
+            "CREATE INDEX IF NOT EXISTS idx_sign_time ON co_sign(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_entity (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data_id INTEGER, action_id INTEGER)",
+            "CREATE INDEX IF NOT EXISTS idx_entity_time ON co_entity(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_session (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, action_id INTEGER)",
+            "CREATE INDEX IF NOT EXISTS idx_session_time ON co_session(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_command (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, message TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_command_time ON co_command(time, name_id)",
+            "CREATE TABLE IF NOT EXISTS co_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, message TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_chat_time ON co_chat(time, name_id)",
             "CREATE TABLE IF NOT EXISTS co_user (user TEXT PRIMARY KEY, language TEXT)"
+    };
+
+    /** Old v2 indexes, dropped while the text columns are replaced by dictionary ids. */
+    private static final String[] LEGACY_V2_INDEXES = {
+            "idx_block_pos", "idx_block_user", "idx_block_time",
+            "idx_container_pos", "idx_container_user", "idx_container_time",
+            "idx_item_pos", "idx_item_user", "idx_item_time",
+            "idx_sign_pos", "idx_sign_user", "idx_sign_time",
+            "idx_entity_user", "idx_entity_time",
+            "idx_session_time", "idx_session_user",
+            "idx_command_time", "idx_command_user",
+            "idx_chat_time", "idx_chat_user"
     };
 
     private static final String[] COUNT_TABLES = {
@@ -142,6 +150,11 @@ public final class DatabaseManager {
             return size() > 8192;
         }
     });
+
+    /** Player names, world ids and action/cause strings, same caching scheme as {@link #stateCache}. */
+    private final Map<String, Long> nameIds = dictionaryCache();
+    private final Map<String, Long> worldIds = dictionaryCache();
+    private final Map<String, Long> actionIds = dictionaryCache();
 
     private Connection conn;
     private volatile boolean open;
@@ -193,21 +206,34 @@ public final class DatabaseManager {
         scheduleBackups();
     }
 
-    /** Schema setup (version check, one-time v1->v2 migration, DDL). Runs on the writer connection. */
+    /** Schema setup (version check, one-time v1->v2 and v2->v3 migrations, DDL). Runs on the writer connection. */
     private void initSchema(Connection c) throws SQLException {
         int version = userVersion(c);
-        boolean legacy = version < 2 && hasColumn(c, "co_block", "old_data");
-        if (legacy) {
+        boolean hasBlockTable = tableExists(c, "co_block");
+        if (hasBlockTable && version < 2 && hasColumn(c, "co_block", "old_data")) {
             migrateV1ToV2(c);
-        } else {
-            try (Statement st = c.createStatement()) {
-                st.execute("PRAGMA auto_vacuum=INCREMENTAL");
-                for (String ddl : DDL_V2) {
-                    st.executeUpdate(ddl);
-                }
-                if (version < 2) {
-                    st.executeUpdate("PRAGMA user_version=2");
-                }
+            version = 2;
+        }
+        if (hasBlockTable && version < 3) {
+            migrateV2ToV3(c);
+        }
+        try (Statement st = c.createStatement()) {
+            st.execute("PRAGMA auto_vacuum=INCREMENTAL");
+            for (String ddl : DDL_V3) {
+                st.executeUpdate(ddl);
+            }
+            if (version < 3) {
+                st.executeUpdate("PRAGMA user_version=3");
+            }
+        }
+    }
+
+    private boolean tableExists(Connection c, String table) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")) {
+            ps.setString(1, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
         }
     }
@@ -295,6 +321,135 @@ public final class DatabaseManager {
         st.executeUpdate("UPDATE " + table + " SET " + idColumn
                 + " = (SELECT id FROM co_state WHERE co_state.state = " + table + "." + textColumn + ")"
                 + " WHERE " + idColumn + " IS NULL AND " + textColumn + " IS NOT NULL");
+    }
+
+    /**
+     * One-time v2 -> v3 migration: the {@code user}, {@code wid} and {@code action} strings move
+     * into dictionary tables ({@code co_name}, {@code co_world}, {@code co_action}) and every log
+     * row keeps an integer id instead. Together with the narrower indexes this removes roughly
+     * half of the file size. A backup copy of the v2 database is kept next to the file.
+     */
+    private void migrateV2ToV3(Connection c) throws SQLException {
+        if (hasColumn(c, "co_block", "name_id")) return; // already converted
+        try {
+            Path backup = dbPath.resolveSibling(dbPath.getFileName() + ".bak-v2");
+            if (!Files.exists(backup)) {
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Compressing the database (schema v3); creating backup {} ...",
+                        backup.getFileName());
+                try (Statement st = c.createStatement()) {
+                    // fold the WAL into the main file first, otherwise the copy would miss the
+                    // transactions that were committed after the last checkpoint
+                    st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+                } catch (SQLException e) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] WAL checkpoint before the migration backup failed: {}",
+                            e.toString());
+                }
+                try {
+                    Files.copy(dbPath, backup);
+                } catch (java.io.IOException e) {
+                    throw new SQLException("Failed to create migration backup", e);
+                }
+            }
+            boolean autoCommit = c.getAutoCommit();
+            c.setAutoCommit(false);
+            try (Statement st = c.createStatement()) {
+                st.executeUpdate("CREATE TABLE IF NOT EXISTS co_name (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)");
+                st.executeUpdate("CREATE TABLE IF NOT EXISTS co_world (id INTEGER PRIMARY KEY, wid TEXT NOT NULL UNIQUE)");
+                st.executeUpdate("CREATE TABLE IF NOT EXISTS co_action (id INTEGER PRIMARY KEY, action TEXT NOT NULL UNIQUE)");
+                for (String t : LOG_TABLES) {
+                    if (!tableExists(c, t)) continue;
+                    st.executeUpdate("INSERT OR IGNORE INTO co_name(name) SELECT DISTINCT " + quote("user")
+                            + " FROM " + t + " WHERE " + quote("user") + " IS NOT NULL");
+                    if (hasColumn(c, t, "wid")) {
+                        st.executeUpdate("INSERT OR IGNORE INTO co_world(wid) SELECT DISTINCT wid FROM " + t);
+                    }
+                    if (hasColumn(c, t, "action")) {
+                        st.executeUpdate("INSERT OR IGNORE INTO co_action(action) SELECT DISTINCT action FROM " + t);
+                    }
+                }
+                for (String t : LOG_TABLES) {
+                    if (!tableExists(c, t)) continue;
+                    migrateTextToId(st, t, "user", "name_id", "co_name", "name");
+                    migrateTextToId(st, t, "wid", "wid_id", "co_world", "wid");
+                    migrateTextToId(st, t, "action", "action_id", "co_action", "action");
+                }
+                // a column can only be dropped once its indexes are gone
+                for (String idx : LEGACY_V2_INDEXES) {
+                    st.executeUpdate("DROP INDEX IF EXISTS " + idx);
+                }
+                for (String t : LOG_TABLES) {
+                    if (!tableExists(c, t)) continue;
+                    dropColumnIfExists(st, t, "user");
+                    dropColumnIfExists(st, t, "wid");
+                    dropColumnIfExists(st, t, "action");
+                }
+                gcDictionaries(st);
+                st.executeUpdate("PRAGMA user_version=3");
+            }
+            c.commit();
+            c.setAutoCommit(autoCommit);
+            CoreProtectFabric.LOGGER.info("[CoreProtect] Database schema migrated to v3 "
+                    + "(user/world/action dictionaries); compacting in the background.");
+            CoreProtectFabric.LOGGER.info("[CoreProtect] The pre-migration copy {} is kept as a safety net; "
+                    + "you can delete it once the new database looks correct.",
+                    dbPath.getFileName() + ".bak-v2");
+            legacyMigrated = true;
+        } catch (SQLException e) {
+            try {
+                c.rollback();
+                c.setAutoCommit(true);
+            } catch (SQLException ignored) {
+            }
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Database migration to v3 failed; restore {} to keep using the old schema.",
+                    dbPath.getFileName() + ".bak-v2", e);
+            throw e;
+        }
+    }
+
+    private static final String[] LOG_TABLES = {
+            "co_block", "co_container", "co_item", "co_sign", "co_entity", "co_session", "co_command", "co_chat"};
+
+    private static String quote(String identifier) {
+        return "\"" + identifier + "\"";
+    }
+
+    /** Adds {@code idColumn} and fills it from the dictionary row matching the text column. */
+    private void migrateTextToId(Statement st, String table, String textColumn, String idColumn,
+                                 String dictTable, String dictColumn) throws SQLException {
+        if (!hasColumn(st.getConnection(), table, textColumn)) return;
+        st.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + idColumn + " INTEGER");
+        st.executeUpdate("UPDATE " + table + " SET " + idColumn + " = (SELECT id FROM " + dictTable
+                + " WHERE " + dictTable + "." + dictColumn + " = " + table + "." + textColumn + ")");
+        st.executeUpdate("DROP INDEX IF EXISTS idx_" + table.substring(3) + "_user");
+    }
+
+    private void dropColumnIfExists(Statement st, String table, String column) throws SQLException {
+        if (!hasColumn(st.getConnection(), table, column)) return;
+        st.executeUpdate("ALTER TABLE " + table + " DROP COLUMN " + quote(column));
+    }
+
+    /** Removes dictionary rows that no log row references any more (used after a purge/migration). */
+    private void gcDictionaries(Statement st) throws SQLException {
+        st.executeUpdate("DELETE FROM co_state WHERE id NOT IN ("
+                + "SELECT old_id FROM co_block WHERE old_id IS NOT NULL "
+                + "UNION SELECT new_id FROM co_block WHERE new_id IS NOT NULL "
+                + "UNION SELECT data_id FROM co_container WHERE data_id IS NOT NULL "
+                + "UNION SELECT data_id FROM co_item WHERE data_id IS NOT NULL "
+                + "UNION SELECT data_id FROM co_entity WHERE data_id IS NOT NULL)");
+        st.executeUpdate("DELETE FROM co_name WHERE id NOT IN ("
+                + "SELECT name_id FROM co_block UNION SELECT name_id FROM co_container "
+                + "UNION SELECT name_id FROM co_item UNION SELECT name_id FROM co_sign "
+                + "UNION SELECT name_id FROM co_entity UNION SELECT name_id FROM co_session "
+                + "UNION SELECT name_id FROM co_command UNION SELECT name_id FROM co_chat)");
+        st.executeUpdate("DELETE FROM co_world WHERE id NOT IN ("
+                + "SELECT wid_id FROM co_block UNION SELECT wid_id FROM co_container "
+                + "UNION SELECT wid_id FROM co_item UNION SELECT wid_id FROM co_sign "
+                + "UNION SELECT wid_id FROM co_entity UNION SELECT wid_id FROM co_session)");
+        st.executeUpdate("DELETE FROM co_action WHERE id NOT IN ("
+                + "SELECT action_id FROM co_block WHERE action_id IS NOT NULL "
+                + "UNION SELECT action_id FROM co_item WHERE action_id IS NOT NULL "
+                + "UNION SELECT action_id FROM co_entity WHERE action_id IS NOT NULL "
+                + "UNION SELECT action_id FROM co_session WHERE action_id IS NOT NULL)");
     }
 
     private void applyPragmas(Connection c, boolean readOnly) {
@@ -504,9 +659,9 @@ public final class DatabaseManager {
             long oldId = stateId(l.oldData());
             long newId = stateId(l.newData());
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_block(time,user,wid,x,y,z,type,old_id,new_id,action,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
-                bind(ps, Arrays.asList(l.time(), l.user(), l.wid(), l.x(), l.y(), l.z(), l.type(),
-                        oldId, newId, l.action(), l.meta()));
+                    "INSERT INTO co_block(time,name_id,wid_id,x,y,z,type,old_id,new_id,action_id,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
+                bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(), l.type(),
+                        oldId, newId, actionId(l.action()), l.meta()));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_block", e);
@@ -519,8 +674,9 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_container(time,user,wid,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
-                bind(ps, Arrays.asList(l.time(), l.user(), l.wid(), l.x(), l.y(), l.z(), l.type(), dataId, l.amount()));
+                    "INSERT INTO co_container(time,name_id,wid_id,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
+                bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
+                        l.type(), dataId, l.amount()));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_container", e);
@@ -533,8 +689,9 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_item(time,user,wid,x,y,z,action,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
-                bind(ps, Arrays.asList(l.time(), l.user(), l.wid(), l.x(), l.y(), l.z(), l.action(), dataId, l.amount()));
+                    "INSERT INTO co_item(time,name_id,wid_id,x,y,z,action_id,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
+                bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
+                        actionId(l.action()), dataId, l.amount()));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_item", e);
@@ -544,8 +701,16 @@ public final class DatabaseManager {
 
     public void insertSignAsync(SignLog l) {
         trackUser(l.user());
-        enqueue("INSERT INTO co_sign(time,user,wid,x,y,z,data) VALUES(?,?,?,?,?,?,?)",
-                Arrays.asList(l.time(), l.user(), l.wid(), l.x(), l.y(), l.z(), l.data()));
+        submitWrite(() -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO co_sign(time,name_id,wid_id,x,y,z,data) VALUES(?,?,?,?,?,?,?)")) {
+                bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()),
+                        l.x(), l.y(), l.z(), l.data()));
+                ps.executeUpdate();
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_sign", e);
+            }
+        });
     }
 
     public void insertEntityAsync(EntityLog l) {
@@ -553,8 +718,9 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long dataId = stateId(l.data());
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_entity(time,user,wid,x,y,z,data_id,action) VALUES(?,?,?,?,?,?,?,?)")) {
-                bind(ps, Arrays.asList(l.time(), l.user(), l.wid(), l.x(), l.y(), l.z(), dataId, l.action()));
+                    "INSERT INTO co_entity(time,name_id,wid_id,x,y,z,data_id,action_id) VALUES(?,?,?,?,?,?,?,?)")) {
+                bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
+                        dataId, actionId(l.action())));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_entity", e);
@@ -564,20 +730,91 @@ public final class DatabaseManager {
 
     public void insertSessionAsync(long time, String user, String wid, String action) {
         trackUser(user);
-        enqueue("INSERT INTO co_session(time,user,wid,action) VALUES(?,?,?,?)",
-                Arrays.asList(time, user, wid, action));
+        submitWrite(() -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO co_session(time,name_id,wid_id,action_id) VALUES(?,?,?,?)")) {
+                bind(ps, Arrays.asList(time, nameId(user), worldId(wid), actionId(action)));
+                ps.executeUpdate();
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_session", e);
+            }
+        });
     }
 
     public void insertCommandAsync(long time, String user, String message) {
         trackUser(user);
-        enqueue("INSERT INTO co_command(time,user,message) VALUES(?,?,?)",
-                Arrays.asList(time, user, message));
+        submitWrite(() -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO co_command(time,name_id,message) VALUES(?,?,?)")) {
+                bind(ps, Arrays.asList(time, nameId(user), message));
+                ps.executeUpdate();
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_command", e);
+            }
+        });
     }
 
     public void insertChatAsync(long time, String user, String message) {
         trackUser(user);
-        enqueue("INSERT INTO co_chat(time,user,message) VALUES(?,?,?)",
-                Arrays.asList(time, user, message));
+        submitWrite(() -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO co_chat(time,name_id,message) VALUES(?,?,?)")) {
+                bind(ps, Arrays.asList(time, nameId(user), message));
+                ps.executeUpdate();
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_chat", e);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // String dictionaries (user name, world id, action/cause)
+    // ------------------------------------------------------------------
+
+    /** Resolves a dictionary id through a bounded LRU cache (writer thread only). */
+    private long dictId(String table, String column, String value, Map<String, Long> cache) {
+        if (value == null || value.isEmpty()) return 0L;
+        Long cached = cache.get(value);
+        if (cached != null) return cached;
+        try (PreparedStatement ins = conn.prepareStatement("INSERT INTO " + table + "(" + column
+                + ") VALUES(?) ON CONFLICT(" + column + ") DO NOTHING")) {
+            ins.setString(1, value);
+            ins.executeUpdate();
+            try (PreparedStatement sel = conn.prepareStatement("SELECT id FROM " + table + " WHERE " + column + "=?")) {
+                sel.setString(1, value);
+                try (ResultSet rs = sel.executeQuery()) {
+                    if (rs.next()) {
+                        long id = rs.getLong(1);
+                        cache.put(value, id);
+                        return id;
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to store a " + table + " entry", e);
+        }
+        return 0L;
+    }
+
+    private long nameId(String name) {
+        return dictId("co_name", "name", name, nameIds);
+    }
+
+    private long worldId(String wid) {
+        return dictId("co_world", "wid", wid, worldIds);
+    }
+
+    private long actionId(String action) {
+        return dictId("co_action", "action", action, actionIds);
+    }
+
+    private static Map<String, Long> dictionaryCache() {
+        return Collections.synchronizedMap(new LinkedHashMap<>(256, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                return size() > 8192;
+            }
+        });
     }
 
     public void saveUserLanguageAsync(String user, String language) {
@@ -590,8 +827,10 @@ public final class DatabaseManager {
     // ------------------------------------------------------------------
 
     private static final String BLOCK_SELECT =
-            "SELECT b.id,b.time,b.user,b.wid,b.x,b.y,b.z,b.type,so.state,sn.state,b.action,b.meta "
-                    + "FROM co_block b LEFT JOIN co_state so ON so.id=b.old_id LEFT JOIN co_state sn ON sn.id=b.new_id ";
+            "SELECT b.id,b.time,n.name,w.wid,b.x,b.y,b.z,b.type,so.state,sn.state,a.action,b.meta "
+                    + "FROM co_block b LEFT JOIN co_state so ON so.id=b.old_id LEFT JOIN co_state sn ON sn.id=b.new_id "
+                    + "LEFT JOIN co_name n ON n.id=b.name_id LEFT JOIN co_world w ON w.id=b.wid_id "
+                    + "LEFT JOIN co_action a ON a.id=b.action_id ";
 
     public List<BlockLog> queryBlocks(Criteria c, long limit, long offset) {
         return executeRead(() -> {
@@ -619,7 +858,9 @@ public final class DatabaseManager {
 
     public List<BlockLog> queryBlockHistory(String wid, int x, int y, int z, int limit) {
         return executeRead(() -> {
-            String sql = BLOCK_SELECT + "WHERE b.wid=? AND b.x=? AND b.y=? AND b.z=? ORDER BY b.id DESC LIMIT ?";
+            String sql = BLOCK_SELECT
+                    + "WHERE b.wid_id=(SELECT id FROM co_world WHERE wid=?) AND b.x=? AND b.y=? AND b.z=? "
+                    + "ORDER BY b.id DESC LIMIT ?";
             try (PreparedStatement ps = readConnection().prepareStatement(sql)) {
                 bind(ps, Arrays.asList(wid, x, y, z, limit));
                 try (ResultSet rs = ps.executeQuery()) {
@@ -638,8 +879,9 @@ public final class DatabaseManager {
     public List<ContainerLog> queryContainers(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT c.id,c.time,c.user,c.wid,c.x,c.y,c.z,c.type,s.state,c.amount "
-                            + "FROM co_container c LEFT JOIN co_state s ON s.id=c.data_id WHERE 1=1");
+                    "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount "
+                            + "FROM co_container c LEFT JOIN co_state s ON s.id=c.data_id "
+                            + "LEFT JOIN co_name n ON n.id=c.name_id LEFT JOIN co_world w ON w.id=c.wid_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
             sql.append(" ORDER BY c.id DESC LIMIT ? OFFSET ?");
@@ -662,9 +904,11 @@ public final class DatabaseManager {
 
     public List<ContainerLog> queryContainerHistory(String wid, int x, int y, int z, int limit) {
         return executeRead(() -> {
-            String sql = "SELECT c.id,c.time,c.user,c.wid,c.x,c.y,c.z,c.type,s.state,c.amount FROM co_container c "
+            String sql = "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount FROM co_container c "
                     + "LEFT JOIN co_state s ON s.id=c.data_id "
-                    + "WHERE c.wid=? AND c.x=? AND c.y=? AND c.z=? ORDER BY c.id DESC LIMIT ?";
+                    + "LEFT JOIN co_name n ON n.id=c.name_id LEFT JOIN co_world w ON w.id=c.wid_id "
+                    + "WHERE c.wid_id=(SELECT id FROM co_world WHERE wid=?) AND c.x=? AND c.y=? AND c.z=? "
+                    + "ORDER BY c.id DESC LIMIT ?";
             try (PreparedStatement ps = readConnection().prepareStatement(sql)) {
                 bind(ps, Arrays.asList(wid, x, y, z, limit));
                 try (ResultSet rs = ps.executeQuery()) {
@@ -683,17 +927,17 @@ public final class DatabaseManager {
     public List<ItemLog> queryItems(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT i.id,i.time,i.user,i.wid,i.x,i.y,i.z,i.action,s.state,i.amount "
-                            + "FROM co_item i LEFT JOIN co_state s ON s.id=i.data_id WHERE 1=1");
+                    "SELECT i.id,i.time,n.name,w.wid,i.x,i.y,i.z,ac.action,s.state,i.amount "
+                            + "FROM co_item i LEFT JOIN co_state s ON s.id=i.data_id "
+                            + "LEFT JOIN co_name n ON n.id=i.name_id LEFT JOIN co_world w ON w.id=i.wid_id "
+                            + "LEFT JOIN co_action ac ON ac.id=i.action_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
             // '+item' = pickups, '-item' = drops; plain 'item' shows both
             if ("+item".equals(c.action)) {
-                sql.append(" AND i.action = ?");
-                params.add("+");
+                sql.append(" AND i.action_id = (SELECT id FROM co_action WHERE action = '+')");
             } else if ("-item".equals(c.action)) {
-                sql.append(" AND i.action = ?");
-                params.add("-");
+                sql.append(" AND i.action_id = (SELECT id FROM co_action WHERE action = '-')");
             }
             sql.append(" ORDER BY i.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
@@ -715,7 +959,8 @@ public final class DatabaseManager {
     public List<SignLog> querySigns(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT id,time,user,wid,x,y,z,data FROM co_sign WHERE 1=1");
+                    "SELECT g.id,g.time,n.name,w.wid,g.x,g.y,g.z,g.data FROM co_sign g "
+                            + "LEFT JOIN co_name n ON n.id=g.name_id LEFT JOIN co_world w ON w.id=g.wid_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
             sql.append(" ORDER BY id DESC LIMIT ? OFFSET ?");
@@ -737,8 +982,10 @@ public final class DatabaseManager {
 
     public List<SignLog> querySignHistory(String wid, int x, int y, int z, int limit) {
         return executeRead(() -> {
-            String sql = "SELECT id,time,user,wid,x,y,z,data FROM co_sign "
-                    + "WHERE wid=? AND x=? AND y=? AND z=? ORDER BY id DESC LIMIT ?";
+            String sql = "SELECT g.id,g.time,n.name,w.wid,g.x,g.y,g.z,g.data FROM co_sign g "
+                    + "LEFT JOIN co_name n ON n.id=g.name_id LEFT JOIN co_world w ON w.id=g.wid_id "
+                    + "WHERE g.wid_id=(SELECT id FROM co_world WHERE wid=?) AND g.x=? AND g.y=? AND g.z=? "
+                    + "ORDER BY g.id DESC LIMIT ?";
             try (PreparedStatement ps = readConnection().prepareStatement(sql)) {
                 bind(ps, Arrays.asList(wid, x, y, z, limit));
                 try (ResultSet rs = ps.executeQuery()) {
@@ -756,8 +1003,10 @@ public final class DatabaseManager {
     public List<EntityLog> queryEntities(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT e.id,e.time,e.user,e.wid,e.x,e.y,e.z,s.state,e.action "
-                            + "FROM co_entity e LEFT JOIN co_state s ON s.id=e.data_id WHERE 1=1");
+                    "SELECT e.id,e.time,n.name,w.wid,e.x,e.y,e.z,s.state,ac.action "
+                            + "FROM co_entity e LEFT JOIN co_state s ON s.id=e.data_id "
+                            + "LEFT JOIN co_name n ON n.id=e.name_id LEFT JOIN co_world w ON w.id=e.wid_id "
+                            + "LEFT JOIN co_action ac ON ac.id=e.action_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             // reuse the common filters so a:#kill also honours r:/t:/u:/e:
             appendCommonFilters(sql, params, c);
@@ -801,27 +1050,31 @@ public final class DatabaseManager {
     private List<MessageLog> queryMessages(String table, Criteria c, long limit, long offset, boolean hasAction) {
         return executeRead(() -> {
             // co_session stores wid instead of a message column; alias it so both shapes map to MessageLog.message
-            StringBuilder sql = new StringBuilder("SELECT id,time,user,");
-            sql.append(hasAction ? "wid AS message" : "message");
+            StringBuilder sql = new StringBuilder("SELECT t.id,t.time,n.name,");
+            sql.append(hasAction ? "w.wid AS message" : "t.message");
             if (hasAction) {
-                sql.append(",action");
+                sql.append(",ac.action");
             }
-            sql.append(" FROM ").append(table).append(" WHERE 1=1");
+            sql.append(" FROM ").append(table).append(" t LEFT JOIN co_name n ON n.id=t.name_id");
+            if (hasAction) {
+                sql.append(" LEFT JOIN co_world w ON w.id=t.wid_id LEFT JOIN co_action ac ON ac.id=t.action_id");
+            }
+            sql.append(" WHERE 1=1");
             List<Object> params = new ArrayList<>();
             if (c.time > 0) {
-                sql.append(" AND time >= ?");
+                sql.append(" AND t.time >= ?");
                 params.add(c.time);
             }
             if (c.user != null && !c.user.isEmpty()) {
-                sql.append(" AND user = ?");
+                sql.append(" AND t.name_id IN (SELECT id FROM co_name WHERE name = ? COLLATE NOCASE)");
                 params.add(c.user);
             }
             if (hasAction && "+session".equals(c.action)) {
-                sql.append(" AND action = '+'");
+                sql.append(" AND ac.action = '+'");
             } else if (hasAction && "-session".equals(c.action)) {
-                sql.append(" AND action = '-'");
+                sql.append(" AND ac.action = '-'");
             }
-            sql.append(" ORDER BY id DESC LIMIT ? OFFSET ?");
+            sql.append(" ORDER BY t.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
             params.add(offset);
             try (PreparedStatement ps = readConnection().prepareStatement(sql.toString())) {
@@ -922,6 +1175,10 @@ public final class DatabaseManager {
                 total += ps.executeUpdate();
             }
         }
+        // drop dictionary rows that the deleted log rows were the last users of
+        try (Statement st = conn.createStatement()) {
+            gcDictionaries(st);
+        }
         return total;
     }
 
@@ -978,12 +1235,12 @@ public final class DatabaseManager {
         }
         if (c.user != null && !c.user.isEmpty()) {
             // player names are matched case-insensitively, like /co online does
-            sql.append(" AND user = ? COLLATE NOCASE");
+            sql.append(" AND name_id IN (SELECT id FROM co_name WHERE name = ? COLLATE NOCASE)");
             params.add(c.user);
         }
         if (c.exclude != null && !c.exclude.isEmpty()) {
             // e:<value>: never match this user (kept for compatibility)
-            sql.append(" AND user <> ?");
+            sql.append(" AND name_id NOT IN (SELECT id FROM co_name WHERE name = ? COLLATE NOCASE)");
             params.add(c.exclude);
         }
         if (c.radius > 0 && c.center != null) {
@@ -1024,7 +1281,7 @@ public final class DatabaseManager {
             // (e:stone); previously it was compared against the user column only, so a
             // block exclusion silently filtered nothing
             String like = "%" + c.exclude.toLowerCase() + "%";
-            sql.append(" AND b.action <> ?")
+            sql.append(" AND (a.action IS NULL OR a.action NOT LIKE ?)")
                     .append(" AND (so.state IS NULL OR so.state NOT LIKE ?)")
                     .append(" AND (sn.state IS NULL OR sn.state NOT LIKE ?)");
             params.add(c.exclude);
@@ -1041,7 +1298,7 @@ public final class DatabaseManager {
             case "-block" -> sql.append(" AND b.type = 0");
             default -> {
                 if (action.startsWith("#")) {
-                    sql.append(" AND b.type = 2 AND b.action = ?");
+                    sql.append(" AND b.type = 2 AND b.action_id = (SELECT id FROM co_action WHERE action = ?)");
                     params.add(action);
                 }
             }

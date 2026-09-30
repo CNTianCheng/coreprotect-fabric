@@ -28,14 +28,14 @@
 - **新版本通知**：自动检查 Modrinth，控制台 + 管理员登录时提示新版本
 - **多语言**：en_us / zh_cn / zh_tw / ja_jp，默认自动跟随客户端语言，也可用 `/co language <code>` 手动切换（按玩家持久化）
 - **数据清理**：`/co purge t:<时间>`
-- **SQLite 数据库**：异步写入、游戏线程零阻塞；读取走独立多线程连接池（多核并行）；**压缩存储**：方块状态/物品字符串字典化（v2 结构，旧库首次启动自动迁移备份并压缩）；`/co purge` 后自动压缩文件；mmap 内存映射 + 可调缓存（`database.cacheSizeMB`，默认 128MB）
+- **SQLite 数据库**：异步写入、游戏线程零阻塞；读取走独立多线程连接池（多核并行）；**压缩存储（v3 结构）**：方块状态/物品、玩家名、世界、动作字符串全部字典化，日志行只存整数 id（实测缩小约 48%，旧库首次启动自动迁移并备份）；`/co purge` 后自动压缩文件并回收字典；mmap 内存映射 + 可调缓存（`database.cacheSizeMB`，默认 128MB）
 - **崩溃/断电保护**：WAL 每次提交刷盘（`syncMode: full`）；异常关闭自动检测并在启动时校验（quick_check）；定期热备份 `coreprotect.db.backup`；检测到损坏时**自动从备份恢复**（原件另存为 `.corrupt-<时间>`）
 - **CoreProtect 同款配色**（v22+ 样式）：通用消息前缀为深青色 `CoreProtect - ` + 白色文字；查询标题 `----- CoreProtect | Lookup Results -----`；查询行按"灰色时间 + 绿色`+`/红色`-`标记 + 深青色玩家 + 白色动作 + 深青色对象"着色；状态行为深青色标签 + 白色数值
 
 ## 📥 安装
 
 1. 需要 **Java 25** 和 **Fabric Loader 0.19+**（服务端），并安装 **Fabric API**。
-2. 将 `coreprotect-fabric-26.1.2-1.8.2.jar` 放入服务端 `mods/` 文件夹。
+2. 将 `coreprotect-fabric-26.1.2-1.9.0.jar` 放入服务端 `mods/` 文件夹。
 3. 启动服务器。数据库默认创建在游戏目录下的 `coreprotect.db`，配置在 `config/coreprotect-fabric.json`。
 
 ## 🛠 自行构建
@@ -43,7 +43,7 @@
 ```bash
 # 需要 JDK 25
 ./gradlew build
-# 产物位于 build/libs/coreprotect-fabric-26.1.2-1.8.2.jar
+# 产物位于 build/libs/coreprotect-fabric-26.1.2-1.9.0.jar
 ```
 
 ## 🎮 命令
@@ -186,6 +186,13 @@ SQLite（WAL 模式），默认位于游戏目录：`coreprotect.db`（可用 `d
 - `co_entity`：击杀记录
 - `co_session` / `co_command` / `co_chat`：会话、命令、聊天
 - `co_user`：玩家语言偏好
+- `co_name` / `co_world` / `co_action` / `co_state`：字典表（玩家名、世界、动作、方块/物品状态）
+
+**压缩存储（v3 结构）**：玩家名、世界、动作字符串只存一份，日志行保存整数 id；
+每张日志表只保留位置索引 `(wid_id, x, y, z)` 与复合索引 `(time, name_id)`。
+实测 41.7 万行数据库由 **46.4 MB 降到 24.3 MB（缩小约 48%）**。
+旧库（v1/v2）在首次启动时自动迁移，迁移前会保留一份 `coreprotect.db.bak-v2` 备份，
+确认新库无误后可自行删除；迁移在后台完成，不阻塞服务器启动。
 
 ## 📖 检查模式（Inspect）
 

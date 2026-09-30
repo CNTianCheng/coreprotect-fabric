@@ -61,3 +61,5 @@ github-recovery-codes.txt
 # ------------------------------------------------------------------
 Thumbs.db
 .DS_Store
+*.db.bak-v2
+.build-tools/bench/*.db

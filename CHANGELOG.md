@@ -7,6 +7,22 @@ All notable changes to this project. Release notes with the full bilingual text 
 
 ## English
 
+### v1.9.0 — smaller database (schema v3)
+
+Minecraft **1.21**, **1.21.11**, **26.1.2**.
+
+* Player names, world ids and action/cause strings are dictionary-encoded
+  (`co_name`, `co_world`, `co_action`); log rows store an integer id instead of repeating the
+  text on every row
+* Indexes are narrower: `(wid_id, x, y, z)` for position lookups and one composite
+  `(time, name_id)` index per log table, which also answers user+time lookups
+* Measured on a 417,000-row survival-style database: **46.4 MB → 24.3 MB (48 % smaller)**;
+  an existing v2 database is converted automatically on first start
+  (**48.6 MB → 25.2 MB** in the migration test) and the old file is kept as
+  `coreprotect.db.bak-v2` until you delete it
+* Purging data also drops dictionary entries that nothing references any more
+* No command, permission or config changes — the migration is transparent
+
 ### v1.8.2 — bug fixes for all three full-feature builds
 
 Minecraft **1.21**, **1.21.11**, **26.1.2**. See the [v1.8.2 release](https://github.com/CNTianCheng/coreprotect-fabric/releases/tag/v1.8.2) for the complete list.
@@ -107,6 +123,20 @@ Minecraft 1.21 / 1.21.11 / 26.1.2.
 ---
 
 ## 中文
+
+### v1.9.0 —— 更小的数据库（schema v3）
+
+Minecraft **1.21**、**1.21.11**、**26.1.2**。
+
+* 玩家名、世界 id、动作/来源字符串改为字典表存储（`co_name`、`co_world`、`co_action`），
+  日志行只保存整数 id，不再逐行重复文本
+* 索引更窄：位置查询用 `(wid_id, x, y, z)`，每张日志表只保留一个复合索引 `(time, name_id)`，
+  同时服务于「按时间」和「按玩家 + 时间」的查询
+* 以 41.7 万行的生存服式数据库实测：**46.4 MB → 24.3 MB（缩小 48%）**；
+  已有 v2 数据库在首次启动时自动转换（迁移测试：**48.6 MB → 25.2 MB**），
+  旧文件保留为 `coreprotect.db.bak-v2`，确认无误后可自行删除
+* 清理旧数据（purge）时一并回收不再被引用的字典项
+* 命令、权限、配置均无变化，迁移对使用者透明
 
 ### v1.8.2 —— 三个完整功能版的缺陷修复
 
