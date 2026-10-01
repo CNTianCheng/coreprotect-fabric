@@ -33,6 +33,9 @@ param(
     [string]$Root,
     [switch]$DryRun,
     [switch]$UpdateProject,
+    # With -UpdateProject: send only title, description and body, so the categories,
+    # license and links the owner set on modrinth.com are left exactly as they are.
+    [switch]$TitleBodyOnly,
     [switch]$SetIcon,
     [switch]$DumpPayload,
     [switch]$Force
@@ -301,9 +304,16 @@ if (-not $existing) {
     Write-Host "project exists: $($existing.slug) ($projectId) - $($existing.versions.Count) version(s)"
     if ($UpdateProject) {
         Write-Host 'updating project fields and body ...'
+        $updateBody = $projectBody
+        if ($TitleBodyOnly) {
+            Write-Host 'scope    : title, description and body only (categories, license and links left as the owner set them)'
+            $updateBody = [ordered]@{ title = $project.title; description = $project.description; body = $bodyText }
+        }
         try {
-            $patched = Invoke-Api -Method 'Patch' -Path "/project/$projectId" -Json (To-JsonText $projectBody)
-            Write-Host "updated  : $($patched.slug)"
+            $patched = Invoke-Api -Method 'Patch' -Path "/project/$projectId" -Json (To-JsonText $updateBody)
+            # A PATCH answers with a partial project object that may omit the slug, so
+            # report the slug we asked for rather than whatever came back.
+            Write-Host "updated  : $($project.slug)"
         } catch {
             Write-Host "full update failed ($(Get-ErrorText $_)) - retrying with title/description/body only"
             $minimal = [ordered]@{ title = $project.title; description = $project.description; body = $bodyText }
