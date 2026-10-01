@@ -63,7 +63,7 @@
 - `/co purge t:<时间>` 手动清理旧数据；`dataRetention` 开启后服务器**启动时自动删除**超过 `maxDays` 天的全部记录（条数写入服务器日志，`/co status` 显示开关状态）
 - 数据库位置可配：`databaseFile` 支持相对游戏目录的子路径或绝对路径，父目录自动创建
 - `/co reload` 热重载配置与语言、`/co status` 查看数据库统计
-- **四种语言**：English / 简体中文 / 繁體中文 / 日本語
+- **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский
   - 自动跟随客户端语言，也可 `/co language <代码>` 手动切换（按玩家持久化，`auto` 恢复自动）
   - 添加新语言只需在 `assets/coreprotect/lang/` 增加一份 JSON 翻译文件
 

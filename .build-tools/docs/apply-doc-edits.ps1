@@ -15,6 +15,12 @@
 [CmdletBinding()]
 param(
     [string]$Root,
+    # Name of the edit list next to this script (or an absolute path). Defaults to
+    # doc-edits.json; pass another file to apply a separate batch of edits. Note that
+    # this must NOT be called $Data: PowerShell variables are case-insensitive and this
+    # script assigns the parsed JSON to $data, which a [string]-typed parameter would
+    # silently coerce to its string representation.
+    [string]$EditFile,
     [switch]$WhatIf
 )
 
@@ -25,7 +31,8 @@ if (-not $Root) { $Root = (Resolve-Path (Join-Path $here '..\..')).Path }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $strict = New-Object System.Text.UTF8Encoding($false, $true)
 
-$dataPath = Join-Path $here 'doc-edits.json'
+if (-not $EditFile) { $EditFile = 'doc-edits.json' }
+$dataPath = if ([System.IO.Path]::IsPathRooted($EditFile)) { $EditFile } else { Join-Path $here $EditFile }
 $data = [System.IO.File]::ReadAllText($dataPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 
 Write-Host "== apply doc edits =="

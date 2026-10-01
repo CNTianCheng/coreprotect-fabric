@@ -63,7 +63,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 - `/co purge t:<time>` prunes old data manually; with `dataRetention` enabled the server **automatically deletes** all records older than `maxDays` at startup (row count is written to the server log; `/co status` shows the current state)
 - Database location is configurable: `databaseFile` accepts a path relative to the game directory (subdirectories are created automatically) or an absolute path
 - `/co reload` hot-reloads configuration and languages, `/co status` shows database statistics
-- **Four languages**: English / 简体中文 / 繁體中文 / 日本語
+- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский
   - Automatically follows the client language, or switch manually with `/co language <code>` (persisted per player; `auto` restores automatic mode)
   - Adding a new language only requires a JSON translation file in `assets/coreprotect/lang/`
 

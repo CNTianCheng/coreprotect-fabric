@@ -1,0 +1,89 @@
+{
+  "comment": "Adds ru_ru to the language lists of the three maintained builds and of the root documentation. Applied with: powershell -File .build-tools\\docs\\apply-doc-edits.ps1 -EditFile doc-edits-ru.json",
+  "edits": [
+    {
+      "file": "coreprotect-fabric-1.21/README.md",
+      "find": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp，默认自动跟随客户端语言",
+      "replace": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp / ru_ru，默认自动跟随客户端语言",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21.11/README.md",
+      "find": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp，默认自动跟随客户端语言",
+      "replace": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp / ru_ru，默认自动跟随客户端语言",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-26.1.2/README.md",
+      "find": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp，默认自动跟随客户端语言",
+      "replace": "- **多语言**：en_us / zh_cn / zh_tw / ja_jp / ru_ru，默认自动跟随客户端语言",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21/OVERVIEW.md",
+      "find": "- **四种语言**：English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21.11/OVERVIEW.md",
+      "find": "- **四种语言**：English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-26.1.2/OVERVIEW.md",
+      "find": "- **四种语言**：English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21/OVERVIEW_EN.md",
+      "find": "- **Four languages**: English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21.11/OVERVIEW_EN.md",
+      "find": "- **Four languages**: English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-26.1.2/OVERVIEW_EN.md",
+      "find": "- **Four languages**: English / 简体中文 / 繁體中文 / 日本語",
+      "replace": "- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский",
+      "count": 1
+    },
+    {
+      "file": "README.md",
+      "find": "- **多语言**：English / 简体中文 / 繁體中文 / 日本語，自动跟随客户端语言",
+      "replace": "- **多语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский，自动跟随客户端语言",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "- **四种语言**：English / 简体中文 / 繁體中文 / 日本語，自动跟随客户端语言",
+      "replace": "- **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский，自动跟随客户端语言",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "- **Four languages**: English / 简体中文 / 繁體中文 / 日本語, automatically following the client language",
+      "replace": "- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский, automatically following the client language",
+      "count": 1
+    },
+    {
+      "file": "CONTRIBUTING.md",
+      "find": "(`en_us`, `zh_cn`, `zh_tw`, `ja_jp`)",
+      "replace": "(`en_us`, `zh_cn`, `zh_tw`, `ja_jp`, `ru_ru`)",
+      "count": 1
+    },
+    {
+      "file": "CONTRIBUTING.md",
+      "find": "（`en_us`、`zh_cn`、`zh_tw`、`ja_jp`）",
+      "replace": "（`en_us`、`zh_cn`、`zh_tw`、`ja_jp`、`ru_ru`）",
+      "count": 1
+    }
+  ]
+}

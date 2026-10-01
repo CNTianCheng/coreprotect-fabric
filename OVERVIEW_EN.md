@@ -44,7 +44,7 @@ After `/co inspect`: **left-click** a block to view its history, **right-click**
 ### 5. Data Maintenance & Multi-Language
 
 - `/co purge t:<time>` prunes old data, `/co reload` hot-reloads, `/co status` shows statistics
-- **Four languages**: English / 简体中文 / 繁體中文 / 日本語, automatically following the client language, with manual switching via `/co language <code>` (persisted per player)
+- **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский, automatically following the client language, with manual switching via `/co language <code>` (persisted per player)
 
 ## 1.21-Build Enhancements (v1.9.0 Flagship)
 

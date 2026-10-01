@@ -13,7 +13,7 @@ problems, propose changes, and get a pull request merged.
 
 * **Bug reports** — use the [bug report form](https://github.com/CNTianCheng/coreprotect-fabric/issues/new/choose). Include the mod version, Minecraft version, Fabric Loader version, the exact command you ran, and the relevant server log lines.
 * **Feature requests** — open an issue describing the Minecraft behaviour you want logged, plus how the CoreProtect plugin handles it if you know.
-* **Translations** — language files live in `src/main/resources/assets/coreprotect/lang/` (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`). All files must keep the same key set; a missing key falls back to `en_us`.
+* **Translations** — language files live in `src/main/resources/assets/coreprotect/lang/` (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`, `ru_ru`). All files must keep the same key set; a missing key falls back to `en_us`.
 * **Code** — fixes and features are welcome, but please read the rules below first: they come from real bugs that shipped in this project.
 
 ### Which build should I edit?
@@ -100,7 +100,7 @@ Short imperative subject in English, optionally a body explaining the reasoning:
 
 * **Bug 反馈** —— 使用 [Bug 表单](https://github.com/CNTianCheng/coreprotect-fabric/issues/new/choose)，请附上模组版本、Minecraft 版本、Fabric Loader 版本、执行的命令，以及相关服务器日志。
 * **功能建议** —— 提 Issue 说明希望记录的游戏行为；如果知道 CoreProtect 插件的处理方式，请一并说明。
-* **翻译** —— 语言文件位于 `src/main/resources/assets/coreprotect/lang/`（`en_us`、`zh_cn`、`zh_tw`、`ja_jp`），所有文件必须保持相同的键集合，缺失的键会回退到 `en_us`。
+* **翻译** —— 语言文件位于 `src/main/resources/assets/coreprotect/lang/`（`en_us`、`zh_cn`、`zh_tw`、`ja_jp`、`ru_ru`），所有文件必须保持相同的键集合，缺失的键会回退到 `en_us`。
 * **代码** —— 欢迎修 bug 与提交功能，但请先阅读下面的规则：它们都是这个项目里真实发布过的缺陷换来的。
 
 ### 应该改哪个工程目录？
