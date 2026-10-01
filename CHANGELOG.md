@@ -7,6 +7,13 @@ All notable changes to this project. Release notes with the full bilingual text 
 
 ## English
 
+### v1.9.1 — Russian translation
+
+Minecraft **1.21**, **1.21.11**, **26.1.2**.
+
+* Added a complete Russian (`ru_ru`) translation — 114 keys, the same key set as `en_us`, with every `{0}` placeholder preserved
+* Switch with `/co language ru_ru`, or let it follow a Russian client automatically
+
 ### v1.9.0 — smaller database (schema v3)
 
 Minecraft **1.21**, **1.21.11**, **26.1.2**.
@@ -123,6 +130,13 @@ Minecraft 1.21 / 1.21.11 / 26.1.2.
 ---
 
 ## 中文
+
+### v1.9.1 —— 新增俄语翻译
+
+Minecraft **1.21**、**1.21.11**、**26.1.2**。
+
+* 新增完整的俄语（`ru_ru`）翻译：114 个键与 `en_us` 完全一致，`{0}` 占位符全部保留
+* 可用 `/co language ru_ru` 手动切换，客户端为俄语时自动生效
 
 ### v1.9.0 —— 更小的数据库（schema v3）
 

@@ -1,0 +1,41 @@
+{
+  "comment": "v1.9.1: fixes the placeholder repository URL in fabric.mod.json, adds homepage/issues links, and mentions Russian in the mod description. Applied with: powershell -File .build-tools\\docs\\apply-doc-edits.ps1 -EditFile doc-edits-modjson.json",
+  "edits": [
+    {
+      "file": "coreprotect-fabric-1.21/src/main/resources/fabric.mod.json",
+      "find": "    \"sources\": \"https://github.com/example/coreprotect-fabric\"",
+      "replace": "    \"homepage\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"sources\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"issues\": \"https://github.com/CNTianCheng/coreprotect-fabric/issues\"",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21/src/main/resources/fabric.mod.json",
+      "find": "多语言支持 (EN/简体中文/繁體中文/日本語).",
+      "replace": "多语言支持 (EN/简体中文/繁體中文/日本語/Русский).",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21.11/src/main/resources/fabric.mod.json",
+      "find": "    \"sources\": \"https://github.com/example/coreprotect-fabric\"",
+      "replace": "    \"homepage\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"sources\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"issues\": \"https://github.com/CNTianCheng/coreprotect-fabric/issues\"",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-1.21.11/src/main/resources/fabric.mod.json",
+      "find": "多语言支持 (EN/简体中文/繁體中文/日本語).",
+      "replace": "多语言支持 (EN/简体中文/繁體中文/日本語/Русский).",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-26.1.2/src/main/resources/fabric.mod.json",
+      "find": "    \"sources\": \"https://github.com/example/coreprotect-fabric\"",
+      "replace": "    \"homepage\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"sources\": \"https://github.com/CNTianCheng/coreprotect-fabric\",\n    \"issues\": \"https://github.com/CNTianCheng/coreprotect-fabric/issues\"",
+      "count": 1
+    },
+    {
+      "file": "coreprotect-fabric-26.1.2/src/main/resources/fabric.mod.json",
+      "find": "多语言支持 (EN/简体中文/繁體中文/日本語).",
+      "replace": "多语言支持 (EN/简体中文/繁體中文/日本語/Русский).",
+      "count": 1
+    }
+  ]
+}

@@ -1,0 +1,149 @@
+{
+  "comment": "v1.9.0 -> v1.9.1: bumps the version references in the root documentation and in the Modrinth body, and inserts the v1.9.1 changelog entries. The three build directories are handled by bump-version.ps1. Applied with: powershell -File .build-tools\\docs\\apply-doc-edits.ps1 -EditFile doc-edits-191.json",
+  "edits": [
+    {
+      "file": ".build-tools/modrinth/body.md",
+      "find": "**English / 简体中文 / 繁體中文 / 日本語**; by default the mod follows each player's client language",
+      "replace": "**English / 简体中文 / 繁體中文 / 日本語 / Русский**; by default the mod follows each player's client language",
+      "count": 1
+    },
+    {
+      "file": ".build-tools/modrinth/body.md",
+      "find": "**English / 简体中文 / 繁體中文 / 日本語** 之间切换",
+      "replace": "**English / 简体中文 / 繁體中文 / 日本語 / Русский** 之间切换",
+      "count": 1
+    },
+    {
+      "file": ".build-tools/modrinth/body.md",
+      "find": "-1.9.0.jar",
+      "replace": "-1.9.1.jar",
+      "count": 6
+    },
+    {
+      "file": "README.md",
+      "find": "| **1.21（旗舰）** | **1.9.0** |",
+      "replace": "| **1.21（旗舰）** | **1.9.1** |",
+      "count": 1
+    },
+    {
+      "file": "README.md",
+      "find": "| **1.21.11** | **1.9.0** |",
+      "replace": "| **1.21.11** | **1.9.1** |",
+      "count": 1
+    },
+    {
+      "file": "README.md",
+      "find": "| **26.1.2** | **1.9.0** |",
+      "replace": "| **26.1.2** | **1.9.1** |",
+      "count": 1
+    },
+    {
+      "file": "README.md",
+      "find": "为 v1.9.0 完整功能版**",
+      "replace": "为 v1.9.1 完整功能版**",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "## 1.21 版增强功能（v1.9.0 旗舰版）",
+      "replace": "## 1.21 版增强功能（v1.9.1 旗舰版）",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| v1.9.0 | 数据库体积大幅压缩",
+      "replace": "| v1.9.1 | 新增完整俄语（ru_ru）翻译：114 个键与 en_us 完全一致，`{0}` 占位符全部保留；`/co language ru_ru` 手动切换，客户端为俄语时自动生效 |\n| v1.9.0 | 数据库体积大幅压缩",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 1.21 | 1.9.0（旗舰） | `coreprotect-fabric-1.21-1.9.0.jar` |",
+      "replace": "| 1.21 | 1.9.1（旗舰） | `coreprotect-fabric-1.21-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 1.21.11 | 1.9.0 | `coreprotect-fabric-1.21.11-1.9.0.jar` |",
+      "replace": "| 1.21.11 | 1.9.1 | `coreprotect-fabric-1.21.11-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "| 26.1.2 | 1.9.0 | `coreprotect-fabric-26.1.2-1.9.0.jar` |",
+      "replace": "| 26.1.2 | 1.9.1 | `coreprotect-fabric-26.1.2-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW.md",
+      "find": "均为 v1.9.0 完整功能版**",
+      "replace": "均为 v1.9.1 完整功能版**",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "## 1.21-Build Enhancements (v1.9.0 Flagship)",
+      "replace": "## 1.21-Build Enhancements (v1.9.1 Flagship)",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| v1.9.0 | Much smaller database",
+      "replace": "| v1.9.1 | Complete Russian (`ru_ru`) translation added: all 114 keys match `en_us` and every `{0}` placeholder is preserved; switch with `/co language ru_ru`, or let it follow a Russian client automatically |\n| v1.9.0 | Much smaller database",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 1.21 | 1.9.0 (flagship) | `coreprotect-fabric-1.21-1.9.0.jar` |",
+      "replace": "| 1.21 | 1.9.1 (flagship) | `coreprotect-fabric-1.21-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 1.21.11 | 1.9.0 | `coreprotect-fabric-1.21.11-1.9.0.jar` |",
+      "replace": "| 1.21.11 | 1.9.1 | `coreprotect-fabric-1.21.11-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "| 26.1.2 | 1.9.0 | `coreprotect-fabric-26.1.2-1.9.0.jar` |",
+      "replace": "| 26.1.2 | 1.9.1 | `coreprotect-fabric-26.1.2-1.9.1.jar` |",
+      "count": 1
+    },
+    {
+      "file": "OVERVIEW_EN.md",
+      "find": "all ship the complete v1.9.0 feature set**",
+      "replace": "all ship the complete v1.9.1 feature set**",
+      "count": 1
+    },
+    {
+      "file": "SECURITY.md",
+      "find": "| Minecraft 1.21 | **1.9.0** | ✅ |",
+      "replace": "| Minecraft 1.21 | **1.9.1** | ✅ |",
+      "count": 2
+    },
+    {
+      "file": "SECURITY.md",
+      "find": "| Minecraft 1.21.11 | **1.9.0** | ✅ |",
+      "replace": "| Minecraft 1.21.11 | **1.9.1** | ✅ |",
+      "count": 2
+    },
+    {
+      "file": "SECURITY.md",
+      "find": "| Minecraft 26.1.2 | **1.9.0** | ✅ |",
+      "replace": "| Minecraft 26.1.2 | **1.9.1** | ✅ |",
+      "count": 2
+    },
+    {
+      "file": "CHANGELOG.md",
+      "find": "### v1.9.0 — smaller database (schema v3)",
+      "replace": "### v1.9.1 — Russian translation\n\nMinecraft **1.21**, **1.21.11**, **26.1.2**.\n\n* Added a complete Russian (`ru_ru`) translation — 114 keys, the same key set as `en_us`, with every `{0}` placeholder preserved\n* Switch with `/co language ru_ru`, or let it follow a Russian client automatically\n\n### v1.9.0 — smaller database (schema v3)",
+      "count": 1
+    },
+    {
+      "file": "CHANGELOG.md",
+      "find": "### v1.9.0 —— 更小的数据库（schema v3）",
+      "replace": "### v1.9.1 —— 新增俄语翻译\n\nMinecraft **1.21**、**1.21.11**、**26.1.2**。\n\n* 新增完整的俄语（`ru_ru`）翻译：114 个键与 `en_us` 完全一致，`{0}` 占位符全部保留\n* 可用 `/co language ru_ru` 手动切换，客户端为俄语时自动生效\n\n### v1.9.0 —— 更小的数据库（schema v3）",
+      "count": 1
+    }
+  ]
+}

@@ -68,3 +68,7 @@ Thumbs.db
 # Modrinth publish probes (throwaway upload fixtures and payload dumps)
 .build-tools/modrinth/dummy.jar
 .build-tools/modrinth/payload-*.json
+
+# Server test output (boot logs and captured RCON responses)
+.build-tools/russian-test-output.txt
+.build-tools/commit-msg.txt

@@ -1,29 +1,29 @@
 [
   {
-    "name": "CoreProtect-Fabric 1.9.0",
-    "version_number": "1.9.0",
+    "name": "CoreProtect-Fabric 1.9.1",
+    "version_number": "1.9.1",
     "game_versions": ["1.21"],
     "loaders": ["fabric"],
     "version_type": "release",
     "environment": "dedicated_server_only",
-    "file": "coreprotect-fabric-1.21/build/libs/coreprotect-fabric-1.21-1.9.0.jar"
+    "file": "coreprotect-fabric-1.21/build/libs/coreprotect-fabric-1.21-1.9.1.jar"
   },
   {
-    "name": "CoreProtect-Fabric 1.9.0",
-    "version_number": "1.9.0",
+    "name": "CoreProtect-Fabric 1.9.1",
+    "version_number": "1.9.1",
     "game_versions": ["1.21.11"],
     "loaders": ["fabric"],
     "version_type": "release",
     "environment": "dedicated_server_only",
-    "file": "coreprotect-fabric-1.21.11/build/libs/coreprotect-fabric-1.21.11-1.9.0.jar"
+    "file": "coreprotect-fabric-1.21.11/build/libs/coreprotect-fabric-1.21.11-1.9.1.jar"
   },
   {
-    "name": "CoreProtect-Fabric 1.9.0",
-    "version_number": "1.9.0",
+    "name": "CoreProtect-Fabric 1.9.1",
+    "version_number": "1.9.1",
     "game_versions": ["26.1.2"],
     "loaders": ["fabric"],
     "version_type": "release",
     "environment": "dedicated_server_only",
-    "file": "coreprotect-fabric-26.1.2/build/libs/coreprotect-fabric-26.1.2-1.9.0.jar"
+    "file": "coreprotect-fabric-26.1.2/build/libs/coreprotect-fabric-26.1.2-1.9.1.jar"
   }
 ]

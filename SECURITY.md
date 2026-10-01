@@ -6,9 +6,9 @@
 
 | Build | Version | Supported |
 |---|---|---|
-| Minecraft 1.21 | **1.9.0** | ✅ |
-| Minecraft 1.21.11 | **1.9.0** | ✅ |
-| Minecraft 26.1.2 | **1.9.0** | ✅ |
+| Minecraft 1.21 | **1.9.1** | ✅ |
+| Minecraft 1.21.11 | **1.9.1** | ✅ |
+| Minecraft 26.1.2 | **1.9.1** | ✅ |
 | all other builds (1.21.2 – 1.21.10, 26.1, 26.1.1, 26.2, 1.21.1) | 1.0.0 | ❌ archived |
 
 Only the newest release of the three in-sync builds receives security fixes.
@@ -82,9 +82,9 @@ Please give us reasonable time to ship a fix before publishing details.
 
 | 构建 | 版本 | 是否支持 |
 |---|---|---|
-| Minecraft 1.21 | **1.9.0** | ✅ |
-| Minecraft 1.21.11 | **1.9.0** | ✅ |
-| Minecraft 26.1.2 | **1.9.0** | ✅ |
+| Minecraft 1.21 | **1.9.1** | ✅ |
+| Minecraft 1.21.11 | **1.9.1** | ✅ |
+| Minecraft 26.1.2 | **1.9.1** | ✅ |
 | 其余构建（1.21.2 – 1.21.10、26.1、26.1.1、26.2、1.21.1） | 1.0.0 | ❌ 已归档 |
 
 只有三个同步构建的最新版本会获得安全修复。
