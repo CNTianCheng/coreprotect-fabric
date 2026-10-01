@@ -420,9 +420,17 @@ foreach ($v in $versions) {
     }
 
     Write-Host "uploading: $($v.version_number) <- $(Split-Path -Leaf $jarPath)"
-    $result = Send-Multipart -Path '/version' -Json (To-JsonText $payload) -Files $files
-    if ($result.Status -lt 200 -or $result.Status -ge 300) {
-        Write-Host "  HTTP $($result.Status): $($result.Text)"
+    # api.modrinth.com intermittently rejects a perfectly valid upload with the actix
+    # framework's plain-text 405 "Request did not meet this resource's requirements."
+    # (no labrinth JSON envelope, no version created). Replaying the byte-identical
+    # request later returns 200, so retry a few times before reporting a failure.
+    $json = To-JsonText $payload
+    $result = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $result = Send-Multipart -Path '/version' -Json $json -Files $files
+        if ($result.Status -ge 200 -and $result.Status -lt 300) { break }
+        Write-Host "  attempt $attempt -> HTTP $($result.Status): $($result.Text)"
+        if ($attempt -lt 3) { Start-Sleep -Seconds 20 }
     }
     if ($result.Status -lt 200 -or $result.Status -ge 300) {
         Write-Host "  FAILED (HTTP $($result.Status)): $($result.Text)"
