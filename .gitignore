@@ -72,3 +72,7 @@ Thumbs.db
 # Server test output (boot logs and captured RCON responses)
 .build-tools/russian-test-output.txt
 .build-tools/commit-msg.txt
+
+# Performance benchmark databases and downloaded comparison jars
+.build-tools/perf/data/
+.build-tools/perf/jars/

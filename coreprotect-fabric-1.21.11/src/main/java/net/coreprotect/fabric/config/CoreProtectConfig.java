@@ -118,6 +118,15 @@ public final class CoreProtectConfig {
         public int cacheSizeMB = 128;
         /** WAL durability: "full" fsyncs every commit (max crash safety, default); "normal" is faster. */
         public String syncMode = "full";
+        /**
+         * How long a log row may wait before it is written, in milliseconds. Rows are
+         * collected for this long and committed as one transaction, which turns dozens of
+         * fsyncs per second into a handful. A crash can lose at most this window (250 ms
+         * by default). 0 writes each row in its own transaction (slowest, most durable).
+         */
+        public int batchIntervalMs = 250;
+        /** Maximum rows written in one transaction (a burst is split into several batches). */
+        public int batchMaxRows = 1000;
         /** How often the WAL is checkpointed in the background, in minutes (smaller WAL = faster crash recovery). */
         public int checkpointMinutes = 10;
         /** How often a hot backup (VACUUM INTO) is written to <db>.backup, in minutes (0 = disabled). */
@@ -195,6 +204,14 @@ public final class CoreProtectConfig {
             }
             if (!"normal".equalsIgnoreCase(this.database.syncMode)) {
                 this.database.syncMode = "full";
+                corrected = true;
+            }
+            if (this.database.batchIntervalMs < 0 || this.database.batchIntervalMs > 5000) {
+                this.database.batchIntervalMs = 250;
+                corrected = true;
+            }
+            if (this.database.batchMaxRows < 1 || this.database.batchMaxRows > 100000) {
+                this.database.batchMaxRows = 1000;
                 corrected = true;
             }
             if (this.database.checkpointMinutes < 1) {

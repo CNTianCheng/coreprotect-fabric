@@ -229,31 +229,35 @@ public final class CoCommand {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         DatabaseManager db = mod.database();
         Translator t = mod.translator();
-        ServerPlayerEntity p = source.getPlayer();
-        String on = t.get(p, "coreprotect.word.on");
-        String off = t.get(p, "coreprotect.word.off");
-        CoreProtectConfig.Logging log = mod.config().logging;
-        Messages.title(source, "coreprotect.status.header");
-        Messages.statusLine(source, "coreprotect.status.version", CoreProtectFabric.MOD_VERSION);
-        Messages.statusLine(source, "coreprotect.status.database", String.valueOf(db.dbPath()));
-        long[] counts = db.counts();
-        Messages.statusLine(source, "coreprotect.status.counts",
-                counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]);
-        Messages.statusLine(source, "coreprotect.status.language",
-                t.defaultLanguage(), String.join(", ", t.available()));
-        Messages.statusLine(source, "coreprotect.status.logging",
-                log.block ? on : off, log.container ? on : off, log.entity ? on : off,
-                log.chat ? on : off, log.command ? on : off, log.session ? on : off,
-                log.natural ? on : off, log.hopper ? on : off, log.dispenser ? on : off,
-                log.item ? on : off, log.signEdit ? on : off);
-        Messages.statusLine(source, "coreprotect.status.permgroups",
-                mod.config().permissionGroups.enabled ? on : off, Permissions.groupCount());
-        CoreProtectConfig.DataRetention r = mod.config().dataRetention;
-        if (r != null && r.enabled && r.maxDays > 0) {
-            Messages.statusLine(source, "coreprotect.status.retention.on", r.maxDays);
-        } else {
-            Messages.statusLine(source, "coreprotect.status.retention.off");
-        }
+        // The eight table counts used to run on the tick thread (8 x get(30 s)); the whole
+        // report is now printed from the callback, so the ordering stays the same.
+        LookupService.query(source, db::countsSequential, counts -> {
+            long[] rows = counts == null ? new long[8] : counts;
+            ServerPlayerEntity p = source.getPlayer();
+            String on = t.get(p, "coreprotect.word.on");
+            String off = t.get(p, "coreprotect.word.off");
+            CoreProtectConfig.Logging log = mod.config().logging;
+            Messages.title(source, "coreprotect.status.header");
+            Messages.statusLine(source, "coreprotect.status.version", CoreProtectFabric.MOD_VERSION);
+            Messages.statusLine(source, "coreprotect.status.database", String.valueOf(db.dbPath()));
+            Messages.statusLine(source, "coreprotect.status.counts",
+                    rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]);
+            Messages.statusLine(source, "coreprotect.status.language",
+                    t.defaultLanguage(), String.join(", ", t.available()));
+            Messages.statusLine(source, "coreprotect.status.logging",
+                    log.block ? on : off, log.container ? on : off, log.entity ? on : off,
+                    log.chat ? on : off, log.command ? on : off, log.session ? on : off,
+                    log.natural ? on : off, log.hopper ? on : off, log.dispenser ? on : off,
+                    log.item ? on : off, log.signEdit ? on : off);
+            Messages.statusLine(source, "coreprotect.status.permgroups",
+                    mod.config().permissionGroups.enabled ? on : off, Permissions.groupCount());
+            CoreProtectConfig.DataRetention r = mod.config().dataRetention;
+            if (r != null && r.enabled && r.maxDays > 0) {
+                Messages.statusLine(source, "coreprotect.status.retention.on", r.maxDays);
+            } else {
+                Messages.statusLine(source, "coreprotect.status.retention.off");
+            }
+        });
         return 1;
     }
 
@@ -298,24 +302,25 @@ public final class CoCommand {
         Messages.cmd(source, online ? "coreprotect.online.currently_online" : "coreprotect.online.not_online", c.user);
         int pageSize = mod.config().lookup.maxLines;
         long offset = Math.max(0, (long) (c.page - 1) * pageSize);
-        List<DatabaseManager.MessageLog> logs = mod.database().querySessions(c, pageSize, offset);
-        List<Text> rows = LookupService.formatOnlineRows(source,
-                logs == null ? List.of() : logs);
-        if (rows.isEmpty()) {
-            Messages.cmd(source, "coreprotect.online.empty", c.user);
-            return 1;
-        }
-        Messages.title(source, "coreprotect.online.header", c.user);
-        for (Text row : rows) {
-            Messages.send(source, row);
-        }
-        if (rows.size() >= pageSize) {
-            StringBuilder sb = new StringBuilder("/co online ").append(c.user);
-            long secondsAgo = net.coreprotect.fabric.util.TimeUtil.now() - c.time;
-            if (secondsAgo > 0) sb.append(" t:").append(secondsAgo);
-            sb.append(" p:").append(c.page + 1);
-            Messages.footer(source, sb.toString(), "coreprotect.lookup.footer", c.page + 1);
-        }
+        // The session query runs on the read pool; the listing is sent from the callback.
+        LookupService.query(source, () -> mod.database().querySessions(c, pageSize, offset), logs -> {
+            List<Text> rows = LookupService.formatOnlineRows(source, logs == null ? List.of() : logs);
+            if (rows.isEmpty()) {
+                Messages.cmd(source, "coreprotect.online.empty", c.user);
+                return;
+            }
+            Messages.title(source, "coreprotect.online.header", c.user);
+            for (Text row : rows) {
+                Messages.send(source, row);
+            }
+            if (rows.size() >= pageSize) {
+                StringBuilder sb = new StringBuilder("/co online ").append(c.user);
+                long secondsAgo = net.coreprotect.fabric.util.TimeUtil.now() - c.time;
+                if (secondsAgo > 0) sb.append(" t:").append(secondsAgo);
+                sb.append(" p:").append(c.page + 1);
+                Messages.footer(source, sb.toString(), "coreprotect.lookup.footer", c.page + 1);
+            }
+        });
         return 1;
     }
 
@@ -385,35 +390,15 @@ public final class CoCommand {
             c.center = source.getPlayer() != null ? source.getPlayer().getBlockPos() : BlockPos.ORIGIN;
         }
         Messages.cmd(source, isRestore ? "coreprotect.restore.start" : "coreprotect.rollback.start");
-        RollbackManager.Summary summary;
-        try {
-            summary = CoreProtectFabric.instance().rollbackManager().rollback(source, c, isRestore);
-        } catch (Exception e) {
-            CoreProtectFabric.LOGGER.error("[CoreProtect] Rollback command failed", e);
-            Messages.error(source, "coreprotect.error.db", e.toString());
-            return 0;
-        }
-        if (summary == null) {
-            Messages.error(source, "coreprotect.rollback.too_many",
-                    CoreProtectFabric.instance().config().rollback.maxBlocks);
-            return 0;
-        }
-        if (summary.blocks() == 0 && summary.itemOps() == 0) {
-            Messages.cmd(source, "coreprotect.rollback.empty");
-            return 1;
-        }
-        Messages.success(source, isRestore ? "coreprotect.restore.complete" : "coreprotect.rollback.complete",
-                summary.blocks(), summary.containers(), summary.itemOps(), summary.skipped());
+        // The rollback runs asynchronously: the queries happen on the read pool and the world
+        // is edited in short slices on the server thread, so a 5000-block rollback no longer
+        // freezes the server. Completion and error messages are sent by RollbackManager.
+        CoreProtectFabric.instance().rollbackManager().startRollback(source, c, isRestore);
         return 1;
     }
 
     private static int undo(ServerCommandSource source) {
-        RollbackManager.Summary summary = CoreProtectFabric.instance().rollbackManager().undo(source);
-        if (summary == null) {
-            Messages.cmd(source, "coreprotect.undo.empty");
-            return 0;
-        }
-        Messages.success(source, "coreprotect.undo.complete", summary.blocks());
+        CoreProtectFabric.instance().rollbackManager().startUndo(source);
         return 1;
     }
 
@@ -428,10 +413,20 @@ public final class CoCommand {
             Messages.error(source, "coreprotect.purge.require_time");
             return 0;
         }
-        long rows = CoreProtectFabric.instance().database().purge(c.time);
-        Messages.success(source, "coreprotect.purge.complete", rows);
-        // compact the database file in the background after deleting old data
-        CoreProtectFabric.instance().database().vacuumAsync();
+        // Deleting old rows can take a while on a large database, so it runs on the read
+        // pool and the result is reported from the callback instead of stalling the tick.
+        long before = c.time;
+        LookupService.query(source, 
+                () -> CoreProtectFabric.instance().database().purge(before),
+                rows -> {
+                    if (rows == null) {
+                        Messages.error(source, "coreprotect.error.db", "database read failed");
+                        return;
+                    }
+                    Messages.success(source, "coreprotect.purge.complete", rows);
+                    // compact the database file in the background after deleting old data
+                    CoreProtectFabric.instance().database().vacuumAsync();
+                });
         return 1;
     }
 

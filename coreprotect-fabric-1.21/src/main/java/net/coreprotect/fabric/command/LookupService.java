@@ -3,6 +3,8 @@ package net.coreprotect.fabric.command;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
@@ -45,6 +47,32 @@ public final class LookupService {
         return action != null && action.startsWith("#");
     }
 
+    /**
+     * Runs a query for a command and hands the result to {@code callback}.
+     *
+     * <p>Players get the non-blocking path: the query runs on the read pool and the callback
+     * is invoked on the server thread when it is ready, so a large lookup never stalls a
+     * tick. Console, RCON and command-block sources only receive output while the command is
+     * still executing (their output buffer is flushed when it returns), so for them the
+     * query runs inline and the callback fires before this returns.
+     */
+    public static <T> void query(ServerCommandSource source, Callable<T> task, Consumer<T> callback) {
+        CoreProtectFabric mod = CoreProtectFabric.instance();
+        if (mod == null) return;
+        if (source != null && source.getPlayer() != null) {
+            mod.database().submitRead(task, callback);
+            return;
+        }
+        T result;
+        try {
+            result = task.call();
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Query failed: {}", e.toString());
+            result = null;
+        }
+        callback.accept(result);
+    }
+
     public static int run(ServerCommandSource source, Criteria c) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return 0;
@@ -56,37 +84,60 @@ public final class LookupService {
 
         int pageSize = mod.config().lookup.maxLines;
         long offset = Math.max(0, (long) (c.page - 1) * pageSize);
-        List<Text> rows = new ArrayList<>();
 
-        // 'container', 'kill', 'chat', ... are accepted without the leading '#' so the
-        // CoreProtect-style "a:container" spelling works as expected.
-        switch (action) {
-            case "container", "+container", "-container", "#container" ->
-                    rows.addAll(formatContainerRows(source, orEmpty(mod.database().queryContainers(c, pageSize, offset))));
-            case "item", "+item", "-item", "#item" ->
-                    rows.addAll(formatItemRows(source, orEmpty(mod.database().queryItems(c, pageSize, offset))));
-            case "sign", "#sign" ->
-                    rows.addAll(formatSignRows(source, orEmpty(mod.database().querySigns(c, pageSize, offset))));
-            case "kill", "kills", "#kill", "#kills", "death", "#death" ->
-                    rows.addAll(formatEntityRows(source, orEmpty(mod.database().queryEntities(c, pageSize, offset))));
-            case "chat", "#chat" ->
-                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryChat(c, pageSize, offset))));
-            case "command", "#command" ->
-                    rows.addAll(formatMessageRows(source, orEmpty(mod.database().queryCommands(c, pageSize, offset))));
-            case "session", "+session", "-session", "#session" ->
-                    rows.addAll(formatSessionRows(source, orEmpty(mod.database().querySessions(c, pageSize, offset))));
-            default ->
-                    rows.addAll(formatBlockRows(source, orEmpty(mod.database().queryBlocks(c, pageSize, offset))));
-        }
+        // The query runs on the read pool and the rows are formatted and sent from the
+        // callback on the server thread: a large lookup used to park the tick thread for
+        // as long as the query took (up to 30 s per query).
+        query(source, () -> {
+            DatabaseManager db = mod.database();
+            // 'container', 'kill', 'chat', ... are accepted without the leading '#' so the
+            // CoreProtect-style "a:container" spelling works as expected.
+            Object rows = switch (action) {
+                case "container", "+container", "-container", "#container" -> db.queryContainers(c, pageSize, offset);
+                case "item", "+item", "-item", "#item" -> db.queryItems(c, pageSize, offset);
+                case "sign", "#sign" -> db.querySigns(c, pageSize, offset);
+                case "kill", "kills", "#kill", "#kills", "death", "#death" -> db.queryEntities(c, pageSize, offset);
+                case "chat", "#chat" -> db.queryChat(c, pageSize, offset);
+                case "command", "#command" -> db.queryCommands(c, pageSize, offset);
+                case "session", "+session", "-session", "#session" -> db.querySessions(c, pageSize, offset);
+                default -> db.queryBlocks(c, pageSize, offset);
+            };
+            return new QueryResult(action, rows, db.readFailed());
+        }, result -> sendRows(source, c, pageSize, result));
+        return 1;
+    }
 
+    /** Raw lookup rows, handed from the read pool to the server thread. */
+    private record QueryResult(String action, Object rows, boolean failed) {
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void sendRows(ServerCommandSource source, Criteria c, int pageSize, QueryResult result) {
         // a failed read (timeout / SQL error) must never be reported as "no results"
-        if (mod.database().readFailed()) {
+        if (result == null || result.failed()) {
             Messages.error(source, "coreprotect.error.db", "database read failed");
-            return 0;
+            return;
         }
-        if (rows == null || rows.isEmpty()) {
+        List<Text> rows = new ArrayList<>();
+        switch (result.action()) {
+            case "container", "+container", "-container", "#container" ->
+                    rows.addAll(formatContainerRows(source, orEmpty((List<DatabaseManager.ContainerLog>) result.rows())));
+            case "item", "+item", "-item", "#item" ->
+                    rows.addAll(formatItemRows(source, orEmpty((List<DatabaseManager.ItemLog>) result.rows())));
+            case "sign", "#sign" ->
+                    rows.addAll(formatSignRows(source, orEmpty((List<DatabaseManager.SignLog>) result.rows())));
+            case "kill", "kills", "#kill", "#kills", "death", "#death" ->
+                    rows.addAll(formatEntityRows(source, orEmpty((List<DatabaseManager.EntityLog>) result.rows())));
+            case "chat", "#chat", "command", "#command" ->
+                    rows.addAll(formatMessageRows(source, orEmpty((List<DatabaseManager.MessageLog>) result.rows())));
+            case "session", "+session", "-session", "#session" ->
+                    rows.addAll(formatSessionRows(source, orEmpty((List<DatabaseManager.MessageLog>) result.rows())));
+            default ->
+                    rows.addAll(formatBlockRows(source, orEmpty((List<DatabaseManager.BlockLog>) result.rows())));
+        }
+        if (rows.isEmpty()) {
             Messages.cmd(source, "coreprotect.lookup.empty");
-            return 1;
+            return;
         }
         Messages.cmd(source, "coreprotect.lookup.rows_found", rows.size());
         Messages.send(source, lookupHeader(source));
@@ -96,7 +147,6 @@ public final class LookupService {
         if (rows.size() >= pageSize) {
             Messages.footer(source, buildLookupCommand(c, c.page + 1), "coreprotect.lookup.footer", c.page + 1);
         }
-        return 1;
     }
 
     /** Rebuilds the /co lookup command for the next page, carrying over all current filters. */

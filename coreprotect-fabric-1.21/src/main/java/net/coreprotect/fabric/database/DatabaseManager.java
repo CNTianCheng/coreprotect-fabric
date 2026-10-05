@@ -11,21 +11,27 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import net.coreprotect.fabric.CoreProtectFabric;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.server.MinecraftServer;
 
 /**
  * SQLite storage, close to the CoreProtect schema.
@@ -36,10 +42,12 @@ import net.fabricmc.loader.api.FabricLoader;
  * backup), the text columns are dropped, and the file is rebuilt with
  * {@code auto_vacuum=INCREMENTAL}; {@code /co purge} compacts the file afterwards.
  *
- * <p><b>Speed</b>: writes run fire-and-forget on a single writer thread (WAL),
- * reads run on a parallel pool (up to 8 threads, one SQLite connection each) so
- * lookups never queue behind writes and concurrent lookups use multiple cores.
- * Connections use a large page cache and memory-mapped I/O.
+ * <p><b>Speed</b>: log rows are queued and written in batches (one transaction per
+ * {@code database.batchMaxRows} rows or {@code database.batchIntervalMs} milliseconds,
+ * whichever comes first), which replaces one fsync per row with one per batch. Writes run on
+ * a single writer thread (WAL) and reads run on a parallel pool (up to 8 threads, one SQLite
+ * connection each). Queries never run on the server thread: {@link #submitRead} returns the
+ * result there when it is ready. Connections use a large page cache and memory-mapped I/O.
  */
 public final class DatabaseManager {
 
@@ -159,6 +167,28 @@ public final class DatabaseManager {
     private Connection conn;
     private volatile boolean open;
     private Path dbPath;
+
+    // ------------------------------------------------------------------
+    // Batched writes
+    //
+    // Every log row used to be its own autocommit statement, so it was also its own WAL
+    // transaction and - with the default synchronous=FULL - its own fsync. A busy server
+    // produces hundreds of rows per second, and that many fsyncs saturate the disk queue,
+    // which is what shows up as MSPT spikes. Rows are now queued and written in one
+    // transaction per batch (measured ~100x cheaper per row, see
+    // .build-tools/perf/PERF-NOTES.md).
+    // ------------------------------------------------------------------
+
+    /** Queued writes, drained by {@link #flushWrites()} inside a single transaction. */
+    private final ArrayBlockingQueue<Runnable> writeQueue = new ArrayBlockingQueue<>(65536);
+    /** True while a flush is already scheduled, so a burst does not queue thousands of them. */
+    private final AtomicBoolean flushScheduled = new AtomicBoolean();
+    /** Rows dropped because the queue was full (only possible during a sustained disk stall). */
+    private final AtomicLong droppedWrites = new AtomicLong();
+    /** Transactions committed since startup, reported by /co status. */
+    private final AtomicLong committedBatches = new AtomicLong();
+    /** Reused prepared statements (writer thread only). */
+    private final Map<String, PreparedStatement> statements = new HashMap<>();
 
     public boolean isOpen() {
         return open;
@@ -502,6 +532,7 @@ public final class DatabaseManager {
                 // 1 GB mmap) keep the database locked, so moving it would fail and abort recovery.
                 open = false; // writes are dropped while the files are swapped
                 closeReadConnections();
+                closeStatements();
                 try {
                     conn.close();
                 } catch (SQLException ignored) {
@@ -594,13 +625,17 @@ public final class DatabaseManager {
         open = false; // drop any write that arrives from now on
         // Flush and close on the writer thread, but never lose the close task to a timed
         // get(): a backup/purge queued ahead of it used to push it past the 60 s timeout.
+        // The queued batch is drained first, so rows logged just before the shutdown are
+        // still written (they are no longer sitting in the executor queue).
         try {
             worker.submit(() -> {
+                drainWrites();
                 if (conn != null) {
                     try (Statement st = conn.createStatement()) {
                         st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
                     } catch (SQLException ignored) {
                     }
+                    closeStatements();
                     try {
                         conn.close();
                     } catch (SQLException ignored) {
@@ -610,6 +645,7 @@ public final class DatabaseManager {
             }).get(5, TimeUnit.MINUTES);
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.warn("[CoreProtect] Database close task did not finish cleanly: {}", e.toString());
+            closeStatements();
             if (conn != null) {
                 try {
                     conn.close();
@@ -658,8 +694,8 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long oldId = stateId(l.oldData());
             long newId = stateId(l.newData());
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_block(time,name_id,wid_id,x,y,z,type,old_id,new_id,action_id,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_block(time,name_id,wid_id,x,y,z,type,old_id,new_id,action_id,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(), l.type(),
                         oldId, newId, actionId(l.action()), l.meta()));
                 ps.executeUpdate();
@@ -673,8 +709,8 @@ public final class DatabaseManager {
         trackUser(l.user());
         submitWrite(() -> {
             long dataId = stateId(l.data());
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_container(time,name_id,wid_id,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_container(time,name_id,wid_id,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
                         l.type(), dataId, l.amount()));
                 ps.executeUpdate();
@@ -688,8 +724,8 @@ public final class DatabaseManager {
         trackUser(l.user());
         submitWrite(() -> {
             long dataId = stateId(l.data());
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_item(time,name_id,wid_id,x,y,z,action_id,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_item(time,name_id,wid_id,x,y,z,action_id,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
                         actionId(l.action()), dataId, l.amount()));
                 ps.executeUpdate();
@@ -702,8 +738,8 @@ public final class DatabaseManager {
     public void insertSignAsync(SignLog l) {
         trackUser(l.user());
         submitWrite(() -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_sign(time,name_id,wid_id,x,y,z,data) VALUES(?,?,?,?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_sign(time,name_id,wid_id,x,y,z,data) VALUES(?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()),
                         l.x(), l.y(), l.z(), l.data()));
                 ps.executeUpdate();
@@ -717,8 +753,8 @@ public final class DatabaseManager {
         trackUser(l.user());
         submitWrite(() -> {
             long dataId = stateId(l.data());
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_entity(time,name_id,wid_id,x,y,z,data_id,action_id) VALUES(?,?,?,?,?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_entity(time,name_id,wid_id,x,y,z,data_id,action_id) VALUES(?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
                         dataId, actionId(l.action())));
                 ps.executeUpdate();
@@ -731,8 +767,8 @@ public final class DatabaseManager {
     public void insertSessionAsync(long time, String user, String wid, String action) {
         trackUser(user);
         submitWrite(() -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_session(time,name_id,wid_id,action_id) VALUES(?,?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_session(time,name_id,wid_id,action_id) VALUES(?,?,?,?)");
                 bind(ps, Arrays.asList(time, nameId(user), worldId(wid), actionId(action)));
                 ps.executeUpdate();
             } catch (Exception e) {
@@ -744,8 +780,8 @@ public final class DatabaseManager {
     public void insertCommandAsync(long time, String user, String message) {
         trackUser(user);
         submitWrite(() -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_command(time,name_id,message) VALUES(?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_command(time,name_id,message) VALUES(?,?,?)");
                 bind(ps, Arrays.asList(time, nameId(user), message));
                 ps.executeUpdate();
             } catch (Exception e) {
@@ -757,8 +793,8 @@ public final class DatabaseManager {
     public void insertChatAsync(long time, String user, String message) {
         trackUser(user);
         submitWrite(() -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO co_chat(time,name_id,message) VALUES(?,?,?)")) {
+            try {
+                PreparedStatement ps = prepare("INSERT INTO co_chat(time,name_id,message) VALUES(?,?,?)");
                 bind(ps, Arrays.asList(time, nameId(user), message));
                 ps.executeUpdate();
             } catch (Exception e) {
@@ -776,18 +812,18 @@ public final class DatabaseManager {
         if (value == null || value.isEmpty()) return 0L;
         Long cached = cache.get(value);
         if (cached != null) return cached;
-        try (PreparedStatement ins = conn.prepareStatement("INSERT INTO " + table + "(" + column
-                + ") VALUES(?) ON CONFLICT(" + column + ") DO NOTHING")) {
+        try {
+            PreparedStatement ins = prepare("INSERT INTO " + table + "(" + column
+                    + ") VALUES(?) ON CONFLICT(" + column + ") DO NOTHING");
             ins.setString(1, value);
             ins.executeUpdate();
-            try (PreparedStatement sel = conn.prepareStatement("SELECT id FROM " + table + " WHERE " + column + "=?")) {
-                sel.setString(1, value);
-                try (ResultSet rs = sel.executeQuery()) {
-                    if (rs.next()) {
-                        long id = rs.getLong(1);
-                        cache.put(value, id);
-                        return id;
-                    }
+            PreparedStatement sel = prepare("SELECT id FROM " + table + " WHERE " + column + "=?");
+            sel.setString(1, value);
+            try (ResultSet rs = sel.executeQuery()) {
+                if (rs.next()) {
+                    long id = rs.getLong(1);
+                    cache.put(value, id);
+                    return id;
                 }
             }
         } catch (SQLException e) {
@@ -963,7 +999,9 @@ public final class DatabaseManager {
                             + "LEFT JOIN co_name n ON n.id=g.name_id LEFT JOIN co_world w ON w.id=g.wid_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
-            sql.append(" ORDER BY id DESC LIMIT ? OFFSET ?");
+            // 'id' alone is ambiguous here: co_name and co_world are joined in as well and
+            // both have an id column, so the sign table's alias has to be spelled out.
+            sql.append(" ORDER BY g.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
             params.add(offset);
             try (PreparedStatement ps = readConnection().prepareStatement(sql.toString())) {
@@ -1011,11 +1049,12 @@ public final class DatabaseManager {
             // reuse the common filters so a:#kill also honours r:/t:/u:/e:
             appendCommonFilters(sql, params, c);
             // '#kill' only shows kills, '#death' only deaths; the plain '#kill' alias used to mix both
+            // (co_entity has no "action" column - the action name lives in the joined co_action)
             if ("#kill".equals(c.action) || "kill".equals(c.action) || "#kills".equals(c.action)) {
-                sql.append(" AND e.action = ?");
+                sql.append(" AND ac.action = ?");
                 params.add("kill");
             } else if ("#death".equals(c.action) || "death".equals(c.action)) {
-                sql.append(" AND e.action = ?");
+                sql.append(" AND ac.action = ?");
                 params.add("death");
             }
             sql.append(" ORDER BY e.id DESC LIMIT ? OFFSET ?");
@@ -1122,9 +1161,26 @@ public final class DatabaseManager {
         return out;
     }
 
+    /**
+     * Same result as {@link #counts()} but the eight queries run one after another on the
+     * calling thread's own read connection. Safe from a read-pool thread: the parallel
+     * version submits to the very pool it would be running on and can exhaust it.
+     */
+    public long[] countsSequential() {
+        long[] out = new long[COUNT_TABLES.length];
+        for (int i = 0; i < COUNT_TABLES.length; i++) {
+            try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + COUNT_TABLES[i]);
+                 ResultSet rs = ps.executeQuery()) {
+                out[i] = rs.next() ? rs.getLong(1) : 0L;
+            } catch (Exception e) {
+                out[i] = 0L;
+            }
+        }
+        return out;
+    }
+
     /** Recently seen player names (newest first), for u: command suggestions. */
-    public List<String> recentUsers(int limit) {
-        synchronized (recentUsers) {
+    public List<String> recentUsers(int limit) {        synchronized (recentUsers) {
             List<String> out = new ArrayList<>(recentUsers);
             Collections.reverse(out);
             return out.size() > limit ? out.subList(0, limit) : out;
@@ -1184,6 +1240,7 @@ public final class DatabaseManager {
 
     /** Lightweight: returns freed pages to the file system (requires auto_vacuum=INCREMENTAL). */
     private void incrementalVacuum() {
+        // VACUUM-style maintenance refuses to run while prepared statements are still open,\n        // so the writer's statement cache is dropped first (it fills up again on demand).\n        closeStatements();
         try (Statement st = conn.createStatement()) {
             st.execute("PRAGMA incremental_vacuum");
         } catch (SQLException e) {
@@ -1196,6 +1253,7 @@ public final class DatabaseManager {
         worker.submit(() -> {
             try {
                 long before = Files.size(dbPath);
+                closeStatements();
                 try (Statement st = conn.createStatement()) {
                     st.execute("PRAGMA auto_vacuum=INCREMENTAL");
                     st.execute("VACUUM");
@@ -1370,19 +1428,16 @@ public final class DatabaseManager {
         Long cached = stateCache.get(state);
         if (cached != null) return cached;
         try {
-            try (PreparedStatement ins = conn.prepareStatement(
-                    "INSERT INTO co_state(state) VALUES(?) ON CONFLICT(state) DO NOTHING")) {
-                ins.setString(1, state);
-                ins.executeUpdate();
-            }
-            try (PreparedStatement sel = conn.prepareStatement("SELECT id FROM co_state WHERE state=?")) {
-                sel.setString(1, state);
-                try (ResultSet rs = sel.executeQuery()) {
-                    if (rs.next()) {
-                        long id = rs.getLong(1);
-                        stateCache.put(state, id);
-                        return id;
-                    }
+            PreparedStatement ins = prepare("INSERT INTO co_state(state) VALUES(?) ON CONFLICT(state) DO NOTHING");
+            ins.setString(1, state);
+            ins.executeUpdate();
+            PreparedStatement sel = prepare("SELECT id FROM co_state WHERE state=?");
+            sel.setString(1, state);
+            try (ResultSet rs = sel.executeQuery()) {
+                if (rs.next()) {
+                    long id = rs.getLong(1);
+                    stateCache.put(state, id);
+                    return id;
                 }
             }
         } catch (SQLException e) {
@@ -1393,7 +1448,8 @@ public final class DatabaseManager {
 
     private void enqueue(String sql, List<Object> params) {
         submitWrite(() -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            try {
+                PreparedStatement ps = prepare(sql);
                 bind(ps, params);
                 ps.executeUpdate();
             } catch (Exception e) {
@@ -1403,17 +1459,149 @@ public final class DatabaseManager {
     }
 
     /**
-     * Queues a write on the single writer thread. Writes that arrive after the
-     * database was closed (server shutdown, listener callbacks still firing) are
-     * dropped instead of throwing {@link RejectedExecutionException} on the
-     * server thread.
+     * Queues a log row for the next batch. Writes that arrive after the database was
+     * closed (server shutdown, listener callbacks still firing) are dropped instead of
+     * throwing {@link RejectedExecutionException} on the server thread.
      */
     private void submitWrite(Runnable task) {
         if (!open) return;
+        if (!writeQueue.offer(task)) {
+            long dropped = droppedWrites.incrementAndGet();
+            if (dropped == 1 || dropped % 1000 == 0) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Write queue is full ({} rows dropped so far) - "
+                        + "the disk cannot keep up. Consider database.syncMode=normal.", dropped);
+            }
+            return;
+        }
+        scheduleFlush(batchIntervalMs());
+    }
+
+    private int batchIntervalMs() {
+        CoreProtectFabric mod = CoreProtectFabric.instance();
+        return mod == null ? 250 : Math.max(0, mod.config().database.batchIntervalMs);
+    }
+
+    private int batchMaxRows() {
+        CoreProtectFabric mod = CoreProtectFabric.instance();
+        return mod == null ? 1000 : Math.max(1, mod.config().database.batchMaxRows);
+    }
+
+    /** Schedules one flush on the writer thread unless a flush is already pending. */
+    private void scheduleFlush(long delayMs) {
+        if (!flushScheduled.compareAndSet(false, true)) return;
         try {
-            worker.submit(task);
+            worker.schedule(this::runScheduledFlush, delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
-            // the writer is shutting down; dropping the row is the only safe option
+            flushScheduled.set(false); // the writer is shutting down
+        }
+    }
+
+    private void runScheduledFlush() {
+        flushScheduled.set(false);
+        flushWrites();
+    }
+
+    /**
+     * Writes the queued rows (at most {@code database.batchMaxRows} per call) inside one
+     * transaction and commits once, so a burst of log rows costs a single fsync instead
+     * of one per row. Runs on the writer thread only.
+     */
+    private void flushWrites() {
+        if (conn == null) return;
+        int rows = 0;
+        boolean transaction = false;
+        try {
+            int max = batchMaxRows();
+            while (rows < max) {
+                Runnable task = writeQueue.poll();
+                if (task == null) break;
+                if (!transaction) {
+                    conn.setAutoCommit(false);
+                    transaction = true;
+                }
+                task.run();
+                rows++;
+            }
+            if (transaction) {
+                conn.commit();
+                committedBatches.incrementAndGet();
+            }
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Batch commit failed after {} rows", rows, e);
+            try {
+                conn.rollback();
+            } catch (SQLException ignored) {
+            }
+        } finally {
+            if (transaction) {
+                try {
+                    conn.setAutoCommit(true);
+                } catch (SQLException ignored) {
+                }
+            }
+            if (!writeQueue.isEmpty() && open) {
+                scheduleFlush(0); // more rows are waiting, keep draining
+            }
+        }
+    }
+
+    /** Writes everything still queued. Shutdown path, runs on the writer thread. */
+    private void drainWrites() {
+        while (!writeQueue.isEmpty() && conn != null) {
+            flushWrites();
+        }
+    }
+
+    /** Reuses one prepared statement per SQL string (writer thread only). */
+    private PreparedStatement prepare(String sql) throws SQLException {
+        PreparedStatement ps = statements.get(sql);
+        if (ps == null) {
+            ps = conn.prepareStatement(sql);
+            statements.put(sql, ps);
+        }
+        ps.clearParameters();
+        return ps;
+    }
+
+    private void closeStatements() {
+        for (PreparedStatement ps : statements.values()) {
+            try {
+                ps.close();
+            } catch (SQLException ignored) {
+            }
+        }
+        statements.clear();
+    }
+
+    /** {committed batches, rows still queued, rows dropped} - shown by /co status. */
+    public long[] writeStats() {
+        return new long[]{committedBatches.get(), writeQueue.size(), droppedWrites.get()};
+    }
+
+    /**
+     * Runs a query on the read pool and hands the result back ON THE SERVER THREAD, so
+     * commands never park the tick thread waiting for SQLite. The old path used
+     * {@code executeRead(...)} with {@code get(30, SECONDS)} per query, which stalled the
+     * server for the duration of the query (up to 8 x 30 s for a single {@code /co status}).
+     * A failed query yields {@code null} for the callback.
+     */
+    public <T> void submitRead(Callable<T> task, Consumer<T> callback) {
+        try {
+            readPool.submit(() -> {
+                T value;
+                try {
+                    value = task.call();
+                } catch (Throwable t) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Query failed: {}", t.toString());
+                    value = null;
+                }
+                final T result = value;
+                MinecraftServer server = CoreProtectFabric.instance() == null ? null : CoreProtectFabric.instance().server();
+                if (server == null) return;
+                server.execute(() -> callback.accept(result));
+            });
+        } catch (RejectedExecutionException e) {
+            // the read pool is shutting down; nothing left to answer
         }
     }
 

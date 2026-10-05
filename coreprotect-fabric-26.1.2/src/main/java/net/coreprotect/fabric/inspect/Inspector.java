@@ -55,40 +55,55 @@ public final class Inspector {
         active.remove(player.getUUID());
     }
 
+    /** The three history lists of one position, fetched together on the read pool. */
+    private record History(List<DatabaseManager.BlockLog> blocks,
+                           List<DatabaseManager.ContainerLog> containers,
+                           List<DatabaseManager.SignLog> signs) {
+    }
+
     public void showBlockHistory(ServerPlayer player, Level world, BlockPos pos) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
         CommandSourceStack source = player.createCommandSourceStack();
         String wid = world.dimension().identifier().toString();
         int lines = mod.config().lookup.inspectLines;
-        List<DatabaseManager.BlockLog> blocks = mod.database().queryBlockHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
-        List<DatabaseManager.ContainerLog> containers =
-                mod.database().queryContainerHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
-        List<DatabaseManager.SignLog> signs =
-                mod.database().querySignHistory(wid, pos.getX(), pos.getY(), pos.getZ(), lines);
+        int x = pos.getX();
+        int y = pos.getY();
+        int z = pos.getZ();
+        // World access stays on the server thread, before the read hop.
         BlockState current = world.getBlockState(pos);
-        Messages.coreHeader(source, "coreprotect.inspect.block.coords",
-                pos.getX(), pos.getY(), pos.getZ(),
-                BlockStateUtil.displayName(BlockStateUtil.stringify(current)));
-        if (blocks == null || blocks.isEmpty()) {
-            Messages.cmd(source, "coreprotect.inspect.block.empty");
-        } else {
-            for (Component row : LookupService.formatBlockRows(source, blocks)) {
-                Messages.send(source, row);
+        String currentName = BlockStateUtil.displayName(BlockStateUtil.stringify(current));
+        // The three queries run on the read pool; the messages below are sent from the
+        // callback, which DatabaseManager re-schedules onto the server thread.
+        mod.database().submitRead(() -> new History(
+                mod.database().queryBlockHistory(wid, x, y, z, lines),
+                mod.database().queryContainerHistory(wid, x, y, z, lines),
+                mod.database().querySignHistory(wid, x, y, z, lines)), history -> {
+            List<DatabaseManager.BlockLog> blocks = history == null ? null : history.blocks();
+            List<DatabaseManager.ContainerLog> containers = history == null ? null : history.containers();
+            List<DatabaseManager.SignLog> signs = history == null ? null : history.signs();
+            Messages.coreHeader(source, "coreprotect.inspect.block.coords",
+                    x, y, z, currentName);
+            if (blocks == null || blocks.isEmpty()) {
+                Messages.cmd(source, "coreprotect.inspect.block.empty");
+            } else {
+                for (Component row : LookupService.formatBlockRows(source, blocks)) {
+                    Messages.send(source, row);
+                }
             }
-        }
-        if (containers != null && !containers.isEmpty()) {
-            Messages.title(source, "coreprotect.inspect.container.header", pos.getX(), pos.getY(), pos.getZ());
-            for (Component row : LookupService.formatContainerRows(source, containers)) {
-                Messages.send(source, row);
+            if (containers != null && !containers.isEmpty()) {
+                Messages.title(source, "coreprotect.inspect.container.header", x, y, z);
+                for (Component row : LookupService.formatContainerRows(source, containers)) {
+                    Messages.send(source, row);
+                }
             }
-        }
-        if (signs != null && !signs.isEmpty()) {
-            Messages.title(source, "coreprotect.inspect.sign.header", pos.getX(), pos.getY(), pos.getZ());
-            for (Component row : LookupService.formatSignRows(source, signs)) {
-                Messages.send(source, row);
+            if (signs != null && !signs.isEmpty()) {
+                Messages.title(source, "coreprotect.inspect.sign.header", x, y, z);
+                for (Component row : LookupService.formatSignRows(source, signs)) {
+                    Messages.send(source, row);
+                }
             }
-        }
+        });
     }
 
     public void showAdjacentHistory(ServerPlayer player, Level world, BlockHitResult hit) {

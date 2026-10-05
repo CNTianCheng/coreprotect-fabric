@@ -98,10 +98,29 @@ $i = 2
 foreach ($cmd in $cmds) {
     Start-Sleep -Seconds $cmd.d
     Send-P $i 2 $cmd.c
-    Start-Sleep -Milliseconds 500
-    $r = Read-P
     Write-Host ("=== [{0}] ===" -f $cmd.c)
-    if ($null -ne $r) { Write-Host $r.payload.Trim() } else { Write-Host '(no response)' }
+    # Commands answer asynchronously now (their queries run off the server thread and the
+    # result is sent a tick later), so keep reading until the socket has been quiet for a
+    # moment instead of taking only the first packet.
+    Start-Sleep -Milliseconds 500
+    $stream.ReadTimeout = 700
+    $got = $false
+    $quietSince = $null
+    $limit = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $limit) {
+        $r = $null
+        try { $r = Read-P } catch { }
+        if ($null -ne $r) {
+            $got = $true
+            $quietSince = (Get-Date)
+            Write-Host $r.payload.Trim()
+            continue
+        }
+        if ($got -and $quietSince -and ((Get-Date) - $quietSince).TotalMilliseconds -gt 1200) { break }
+        Start-Sleep -Milliseconds 150
+    }
+    $stream.ReadTimeout = 25000
+    if (-not $got) { Write-Host '(no response)' }
     $i++
 }
 $client.Close()

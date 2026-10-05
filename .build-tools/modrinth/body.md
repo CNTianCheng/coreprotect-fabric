@@ -39,6 +39,13 @@ CoreProtect Fabric is a **server-side Fabric mod**, independently implemented wi
 - `/co purge t:<time>` prunes old data (and reclaims space), `/co status` reports statistics, `/co reload` hot-reloads configuration
 - `/co language <code>` switches between **English / 简体中文 / 繁體中文 / 日本語 / Русский**; by default the mod follows each player's client language
 
+**Performance (v1.9.2)**
+
+- Log rows are written in batches — one commit per 250 ms or 1000 rows, whichever comes first — which measured around **100x cheaper per row** than one commit per row and roughly **15x fewer disk syncs** under load
+- `/co lookup`, `/co inspect`, `/co status`, `/co online` and `/co purge` never run their queries on the server thread
+- Rollback and restore are applied in 4 ms slices spread over several ticks, so a 5000-block rollback no longer freezes the server
+- Coverage is unchanged: every block, container, item, entity, command, session and chat record is still stored
+
 ### Commands
 
 ```
@@ -70,9 +77,9 @@ The database was rebuilt around dictionaries, so repeated text is no longer stor
 
 | Minecraft | Java | Jar |
 |---|---|---|
-| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.1.jar` |
-| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.1.jar` |
-| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.1.jar` |
+| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.2.jar` |
+| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.2.jar` |
+| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.2.jar` |
 
 These three builds carry the complete feature set and are kept in sync. Builds for 13 further versions (1.21.1 – 1.21.10, 26.1, 26.1.1, 26.2) ship the v1.0.0 core feature set and are available from the [GitHub releases](https://github.com/CNTianCheng/coreprotect-fabric/releases).
 
@@ -135,6 +142,13 @@ CoreProtect Fabric 是一个**纯服务端** Fabric 模组，以著名的 Bukkit
 - `/co purge t:<time>` 清理旧数据并回收空间，`/co status` 查看统计，`/co reload` 热重载配置
 - `/co language <code>` 在 **English / 简体中文 / 繁體中文 / 日本語 / Русский** 之间切换，默认跟随玩家客户端语言
 
+**性能（v1.9.2）**
+
+- 记录批量写库：每 250 毫秒或 1000 行提交一次，实测每行成本约为逐条写入的 **1/100**，负载下磁盘同步次数约为 **1/15**
+- `/co lookup`、`/co inspect`、`/co status`、`/co online`、`/co purge` 的查询都不再占用服务器线程
+- 回档与还原按 4 毫秒切片分摊到多个 tick，5000 方块的区域回档不再一次性冻结服务器
+- 记录范围完全没有减少：方块、容器、物品、实体、命令、会话、聊天全部照旧记录
+
 ### 命令
 
 ```
@@ -166,9 +180,9 @@ CoreProtect Fabric 是一个**纯服务端** Fabric 模组，以著名的 Bukkit
 
 | Minecraft | Java | 文件 |
 |---|---|---|
-| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.1.jar` |
-| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.1.jar` |
-| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.1.jar` |
+| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.2.jar` |
+| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.2.jar` |
+| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.2.jar` |
 
 以上三个版本功能完全一致并保持同步；另外 13 个版本（1.21.1 – 1.21.10、26.1、26.1.1、26.2）为 v1.0.0 核心功能集，可在 [GitHub Releases](https://github.com/CNTianCheng/coreprotect-fabric/releases) 下载。
 

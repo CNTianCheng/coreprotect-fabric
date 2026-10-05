@@ -12,6 +12,7 @@ import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.Criteria;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.BlockStateUtil;
+import net.coreprotect.fabric.util.Messages;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -62,124 +63,250 @@ public final class RollbackManager {
     private record LastOperation(String kind, List<BlockUndo> blocks, List<ItemUndo> items) {
     }
 
-    /** Returns {@code null} when the operation exceeds the configured safety limit. */
-    public Summary rollback(CommandSourceStack source, Criteria c, boolean isRestore) {
+    /** Time budget for one slice on the server thread (4 ms), so a big rollback never
+     *  freezes a tick: the rest of the work is re-scheduled onto the next tick. */
+    private static final long SLICE_NANOS = 4_000_000L;
+
+    /** What the read pool prepared for a rollback: nothing here touches the world. */
+    private record Plan(boolean tooLarge,
+                        List<DatabaseManager.BlockLog> blocks,
+                        List<Map.Entry<PosKey, List<DatabaseManager.ContainerLog>>> containers,
+                        int containerGroups) {
+    }
+
+    /** One rollback/restore/undo in flight, advanced one unit of work at a time. */
+    private static final class Job {
+        private final MinecraftServer server;
+        private final CommandSourceStack source;
+        private final ServerPlayer operator;
+        private final boolean isRestore;
+        private final boolean undo;
+
+        private List<Map.Entry<PosKey, List<DatabaseManager.ContainerLog>>> containers = List.of();
+        private int containerGroups;
+        private int groupIndex;
+        private int entryIndex;
+        private List<DatabaseManager.BlockLog> blocks = List.of();
+        private int blockIndex;
+        private LastOperation operation;
+        private int undoIndex;
+
+        private final List<BlockUndo> undos = new ArrayList<>();
+        private final List<ItemUndo> itemUndos = new ArrayList<>();
+        private int blocksApplied;
+        private int itemOps;
+        private int itemsApplied;
+        private int skipped;
+
+        private Job(MinecraftServer server, CommandSourceStack source, ServerPlayer operator,
+                    boolean isRestore, boolean undo) {
+            this.server = server;
+            this.source = source;
+            this.operator = operator;
+            this.isRestore = isRestore;
+            this.undo = undo;
+        }
+    }
+
+    /**
+     * Starts a rollback/restore. The two queries run on the read pool and the world is
+     * edited in 4 ms slices on the server thread, so the command returns immediately and
+     * the server keeps ticking while a large area is restored. All user-visible messages
+     * are sent from here.
+     */
+    public void startRollback(CommandSourceStack source, Criteria c, boolean isRestore) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
-        MinecraftServer server = mod.server();
-        ServerPlayer operator = source.getPlayer();
+        long limit = Math.max(1, mod.config().rollback.maxBlocks) + 1L;
+        int maxBlocks = mod.config().rollback.maxBlocks;
 
         // Both queries are capped one row above the safety limit: SQLite treats a negative
         // LIMIT as "unlimited", which used to load the whole table into memory.
-        long limit = Math.max(1, mod.config().rollback.maxBlocks) + 1L;
-
-        // 1) Safety check BEFORE touching the world: the block set decides whether this
-        //    operation is allowed at all, so a refused rollback must not mutate containers.
-        List<DatabaseManager.BlockLog> logs = mod.database().queryBlocks(c, limit, 0);
-        if (logs == null) {
-            return new Summary(0, 0, 0, 0);
-        }
-        if (logs.size() > mod.config().rollback.maxBlocks) {
-            return null;
-        }
-
-        List<DatabaseManager.ContainerLog> containerLogs = mod.database().queryContainers(c, limit, 0);
-        Map<PosKey, List<DatabaseManager.ContainerLog>> groups = groupContainers(containerLogs);
-        int itemOps = 0;
-        List<ItemUndo> itemUndos = new ArrayList<>();
-        for (Map.Entry<PosKey, List<DatabaseManager.ContainerLog>> entry : groups.entrySet()) {
-            ServerLevel world = worldOf(server, entry.getKey().wid());
-            if (world == null) continue;
-            BlockEntity be = world.getBlockEntity(entry.getKey().pos());
-            if (!(be instanceof Container inv)) continue;
-            for (DatabaseManager.ContainerLog log : entry.getValue()) {
-                int done = reverseContainer(log, inv, operator, world, isRestore);
-                itemOps += done;
-                if (done > 0) {
-                    // deposit: rollback removes -> undo adds; withdraw: rollback adds -> undo removes
-                    boolean deposit = log.type() == DatabaseManager.CONTAINER_DEPOSIT;
-                    boolean added = isRestore == deposit;
-                    itemUndos.add(new ItemUndo(log.wid(), entry.getKey().pos(), log.data(), log.amount(), added));
-                }
+        mod.database().submitRead(() -> {
+            List<DatabaseManager.BlockLog> logs = mod.database().queryBlocks(c, limit, 0);
+            if (logs == null) return null;
+            if (logs.size() > maxBlocks) return new Plan(true, List.of(), List.of(), 0);
+            List<DatabaseManager.ContainerLog> containerLogs = mod.database().queryContainers(c, limit, 0);
+            // newest log per position wins
+            Map<PosKey, DatabaseManager.BlockLog> latest = new LinkedHashMap<>();
+            for (DatabaseManager.BlockLog l : logs) {
+                if (Objects.equals(l.oldData(), l.newData())) continue;
+                latest.putIfAbsent(PosKey.of(l.wid(), l.x(), l.y(), l.z()), l);
             }
-        }
+            Map<PosKey, List<DatabaseManager.ContainerLog>> groups = groupContainers(containerLogs);
+            return new Plan(false, new ArrayList<>(latest.values()),
+                    new ArrayList<>(groups.entrySet()), groups.size());
+        }, plan -> {
+            if (plan == null) {
+                Messages.error(source, "coreprotect.error.db", "database read failed");
+                return;
+            }
+            if (plan.tooLarge()) {
+                Messages.error(source, "coreprotect.rollback.too_many", maxBlocks);
+                return;
+            }
+            Job job = new Job(mod.server(), source, source.getPlayer(), isRestore, false);
+            job.blocks = plan.blocks();
+            job.containers = plan.containers();
+            job.containerGroups = plan.containerGroups();
+            slice(job);
+        });
+    }
 
-        // 2) Blocks: newest log per position wins.
-        Map<PosKey, DatabaseManager.BlockLog> latest = new LinkedHashMap<>();
-        for (DatabaseManager.BlockLog l : logs) {
-            if (Objects.equals(l.oldData(), l.newData())) continue;
-            latest.putIfAbsent(PosKey.of(l.wid(), l.x(), l.y(), l.z()), l);
+    /** Reverts the caller's last rollback/restore. Reports "nothing to undo" itself. */
+    public void startUndo(CommandSourceStack source) {
+        ServerPlayer operator = source.getPlayer();
+        LastOperation op = operator == null ? null : lastOperations.remove(operator.getUUID());
+        if (op == null || (op.blocks().isEmpty() && op.items().isEmpty())) {
+            Messages.cmd(source, "coreprotect.undo.empty");
+            return;
         }
-        int blocks = 0;
-        int skipped = 0;
-        List<BlockUndo> undos = new ArrayList<>();
-        for (DatabaseManager.BlockLog l : latest.values()) {
-            ServerLevel world = worldOf(server, l.wid());
+        Job job = new Job(CoreProtectFabric.instance().server(), source, operator, false, true);
+        job.operation = op;
+        slice(job);
+    }
+
+    /** Applies work until the slice budget runs out, then continues on a later tick. */
+    private void slice(Job job) {
+        long deadline = System.nanoTime() + SLICE_NANOS;
+        do {
+            boolean more;
+            try {
+                more = job.undo ? stepUndo(job) : stepRollback(job);
+            } catch (Exception e) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Rollback failed", e);
+                Messages.error(job.source, "coreprotect.error.db", e.toString());
+                return;
+            }
+            if (!more) {
+                finish(job);
+                return;
+            }
+        } while (System.nanoTime() < deadline);
+        MinecraftServer server = job.server;
+        if (server == null) {
+            finish(job);
+            return;
+        }
+        server.execute(() -> slice(job)); // continue on the next tick
+    }
+
+    private void finish(Job job) {
+        if (job.undo) {
+            Messages.success(job.source, "coreprotect.undo.complete", job.blocksApplied);
+            return;
+        }
+        // The undo record is always replaced: a container-only or fully-skipped rollback must
+        // not leave an older operation armed for the next /co undo.
+        if (job.operator != null) {
+            lastOperations.put(job.operator.getUUID(),
+                    new LastOperation(job.isRestore ? "restore" : "rollback", job.undos, job.itemUndos));
+        }
+        if (job.blocksApplied == 0 && job.itemOps == 0) {
+            Messages.cmd(job.source, "coreprotect.rollback.empty");
+            return;
+        }
+        Messages.success(job.source, job.isRestore ? "coreprotect.restore.complete" : "coreprotect.rollback.complete",
+                job.blocksApplied, job.containerGroups, job.itemOps, job.skipped);
+        if (job.source.getPlayer() == null) {
+            // console and RCON only print their output while the command runs, so the result
+            // of an asynchronous rollback is mirrored into the server log
+            CoreProtectFabric.LOGGER.info("[CoreProtect] {} finished: {} block(s), {} container(s), {} item(s), {} skipped.",
+                    job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroups, job.itemOps, job.skipped);
+        }
+    }
+
+    /** One unit of rollback work. Returns false when there is nothing left to do. */
+    private boolean stepRollback(Job job) {
+        if (job.groupIndex < job.containers.size()) {
+            Map.Entry<PosKey, List<DatabaseManager.ContainerLog>> entry = job.containers.get(job.groupIndex);
+            List<DatabaseManager.ContainerLog> list = entry.getValue();
+            ServerLevel world = worldOf(job.server, entry.getKey().wid());
             if (world == null) {
-                skipped++;
-                continue;
+                job.groupIndex++;
+                job.entryIndex = 0;
+                return true;
+            }
+            BlockEntity be = world.getBlockEntity(entry.getKey().pos());
+            if (!(be instanceof Container inv)) {
+                job.groupIndex++;
+                job.entryIndex = 0;
+                return true;
+            }
+            DatabaseManager.ContainerLog log = list.get(job.entryIndex++);
+            int done = reverseContainer(log, inv, job.operator, world, job.isRestore);
+            job.itemOps += done;
+            if (done > 0) {
+                // deposit: rollback removes -> undo adds; withdraw: rollback adds -> undo removes
+                boolean deposit = log.type() == DatabaseManager.CONTAINER_DEPOSIT;
+                boolean added = job.isRestore == deposit;
+                job.itemUndos.add(new ItemUndo(log.wid(), entry.getKey().pos(), log.data(), log.amount(), added));
+            }
+            if (job.entryIndex >= list.size()) {
+                job.groupIndex++;
+                job.entryIndex = 0;
+            }
+            return true;
+        }
+        if (job.blockIndex < job.blocks.size()) {
+            DatabaseManager.BlockLog l = job.blocks.get(job.blockIndex++);
+            ServerLevel world = worldOf(job.server, l.wid());
+            if (world == null) {
+                job.skipped++;
+                return true;
             }
             BlockPos pos = new BlockPos(l.x(), l.y(), l.z());
-            BlockState target = BlockStateUtil.parse(server, isRestore ? l.newData() : l.oldData());
-            BlockState expected = BlockStateUtil.parse(server, isRestore ? l.oldData() : l.newData());
+            BlockState target = BlockStateUtil.parse(job.server, job.isRestore ? l.newData() : l.oldData());
+            BlockState expected = BlockStateUtil.parse(job.server, job.isRestore ? l.oldData() : l.newData());
             BlockState current = world.getBlockState(pos);
-            if (current.equals(target)) continue; // already in the target state
+            if (current.equals(target)) return true; // already in the target state
             if (!current.equals(expected)) {
-                skipped++; // the world changed since this log entry
-                continue;
+                job.skipped++; // the world changed since this log entry
+                return true;
             }
             if (target.isAir()) {
                 dropContainerContents(world, pos);
             }
             world.setBlock(pos, target, Block.UPDATE_ALL);
             BlockStateUtil.applySignText(world, pos, l.meta());
-            blocks++;
-            undos.add(new BlockUndo(l.wid(), pos, BlockStateUtil.stringify(target), BlockStateUtil.stringify(expected)));
+            job.blocksApplied++;
+            job.undos.add(new BlockUndo(l.wid(), pos, BlockStateUtil.stringify(target), BlockStateUtil.stringify(expected)));
+            return true;
         }
-
-        // The undo record is always replaced: a container-only or fully-skipped rollback must
-        // not leave an older operation armed for the next /co undo.
-        if (operator != null) {
-            lastOperations.put(operator.getUUID(),
-                    new LastOperation(isRestore ? "restore" : "rollback", undos, itemUndos));
-        }
-        return new Summary(blocks, groups.size(), itemOps, skipped);
+        return false;
     }
 
-    /** Reverts the caller's last rollback/restore. Returns {@code null} when there is nothing to undo. */
-    public Summary undo(CommandSourceStack source) {
-        CoreProtectFabric mod = CoreProtectFabric.instance();
-        ServerPlayer operator = source.getPlayer();
-        if (operator == null) return null;
-        LastOperation op = lastOperations.remove(operator.getUUID());
-        if (op == null || (op.blocks().isEmpty() && op.items().isEmpty())) return null;
-        MinecraftServer server = mod.server();
-        int done = 0;
-        for (BlockUndo u : op.blocks()) {
-            ServerLevel world = worldOf(server, u.wid());
-            if (world == null) continue;
+    /** One unit of undo work. Returns false when there is nothing left to do. */
+    private boolean stepUndo(Job job) {
+        LastOperation op = job.operation;
+        if (job.blockIndex < op.blocks().size()) {
+            BlockUndo u = op.blocks().get(job.blockIndex++);
+            ServerLevel world = worldOf(job.server, u.wid());
+            if (world == null) return true;
             BlockState current = world.getBlockState(u.pos());
-            if (!current.equals(BlockStateUtil.parse(server, u.expected()))) continue;
-            world.setBlock(u.pos(), BlockStateUtil.parse(server, u.apply()), Block.UPDATE_ALL);
-            done++;
+            if (!current.equals(BlockStateUtil.parse(job.server, u.expected()))) return true;
+            world.setBlock(u.pos(), BlockStateUtil.parse(job.server, u.apply()), Block.UPDATE_ALL);
+            job.blocksApplied++;
+            return true;
         }
-        int items = 0;
-        for (ItemUndo u : op.items()) {
-            ServerLevel world = worldOf(server, u.wid());
-            if (world == null) continue;
+        if (job.undoIndex < op.items().size()) {
+            ItemUndo u = op.items().get(job.undoIndex++);
+            ServerLevel world = worldOf(job.server, u.wid());
+            if (world == null) return true;
             BlockEntity be = world.getBlockEntity(u.pos());
-            if (!(be instanceof Container inv)) continue;
+            if (!(be instanceof Container inv)) return true;
             Identifier id = Identifier.tryParse(u.item());
-            if (id == null) continue;
+            if (id == null) return true;
             Item item = BuiltInRegistries.ITEM.getOptional(id).orElse(null);
-            if (item == null || item == Items.AIR) continue;
+            if (item == null || item == Items.AIR) return true;
             if (u.wasAdded()) {
-                removeItems(inv, item, u.amount(), operator, world, u.pos());
+                removeItems(inv, item, u.amount(), job.operator, world, u.pos());
             } else {
                 addItems(inv, new ItemStack(item, u.amount()), world, u.pos());
             }
-            items++;
+            job.itemsApplied++;
+            return true;
         }
-        return new Summary(done, 0, items, 0);
+        return false;
     }
 
     // ------------------------------------------------------------------
