@@ -26,6 +26,26 @@
 
     Windows PowerShell 5.1 has no -Form on Invoke-RestMethod, hence the HttpClient
     multipart uploads below.
+
+    KNOWN ISSUE (verified twice, 2026-10-05, v1.9.1 and v1.9.2): POST /version from this
+    script is answered with the actix framework's plain-text
+    "HTTP 405: Request did not meet this resource's requirements." for every build, while
+    the byte-identical payload sent by probe6.ps1 (same process family, same token file,
+    same jars) returns 200 and creates the version. PATCH /project works from here, so the
+    token and scopes are fine; only the version upload is affected, and the cause is still
+    unknown. The verified procedure for a release is therefore two steps:
+
+        powershell -File .build-tools\modrinth\publish.ps1 -DumpPayload
+        powershell -File .build-tools\modrinth\probe6.ps1
+
+    probe6 uploads payload-1 twice (once with an explicit Content-Type, once without) as a
+    leftover of the original diagnosis, so the first 1.21 version it creates has to be
+    deleted afterwards:
+
+        DeleteAsync("https://api.modrinth.com/v2/version/<the extra id>")
+
+    Publishing the project page (title, description, body) still goes through
+    publish.ps1 -UpdateProject -TitleBodyOnly, which does work.
 #>
 [CmdletBinding()]
 param(

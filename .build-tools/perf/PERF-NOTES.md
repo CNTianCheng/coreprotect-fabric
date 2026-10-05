@@ -93,6 +93,23 @@
 ## 6. 验证
 
 - JDBC 微基准：见第 2 节（写入成本降约 100 倍，fsync 次数降 15 倍以上）。
-- 功能回归：`.build-tools/test-quick.ps1` / `test-full.ps1`（RCON 全量用例）在 1.21.11 上运行。
-- 服务器实测：无头服务器 + RCON 合成负载，用 `/tick query` 观察 MSPT。
+- 功能回归：`.build-tools/test-full.ps1` 在 1.21.11 上三次运行，最终一次全部通过——
+  `/co status`、所有 `/co lookup` 动作、`/co online`、`/co purge`（删除 51 行）、`/co reload`、`/co help` 均正常输出，
+  `MIXIN_FAILURES: no`、`CORE_ENABLED: yes`，日志中没有 CoreProtect 的 ERROR/WARN。
+- 异步回档/还原的完成证据（服务器日志，非玩家来源会镜像到控制台）：
+  `[CoreProtect] Rollback finished: 6 block(s), 4 container(s), 43 item(s), 0 skipped.`
+  `[CoreProtect] Restore finished: 7 block(s), 4 container(s), 43 item(s), 0 skipped.`
+- VACUUM 修复证据：`[CoreProtect] Database compacted: 25 MB -> 25 MB (freed 0 MB).`（不再报 SQL statements in progress）。
+
+## 7. 发布（v1.9.2）
+
+- 三个构建 `bump-version.ps1 -From 1.9.1 -To 1.9.2`，各自 `build` 成功，jar 均为 13.62 MB，
+  校验 jar 内 `fabric.mod.json` 的 `version=1.9.2`、`ru_ru.json` 与新增类（`RollbackManager$Job` 等）。
+- GitHub：`release-v192.ps1` 创建 `v1.9.2`（403529058）、`v1.9.2-mc1.21.11`（403529132）、
+  `v1.9.2-mc26.1.2`（403529213），各带 jar 并给上一個版本加 superseded 说明；发布页正文无乱码。
+- Modrinth：项目页正文已更新为与 `body.md` 完全一致（11009 字符，含性能小节与 1.9.2 jar 名），
+  图标未改动；三个版本通过 `probe6.ps1` 上传成功——1.21 `L8RLv29L`、1.21.11 `ZvFwOhfL`、26.1.2 `5Uz5Yjyc`
+  （`publish.ps1` 的 `POST /version` 仍会 405，原因未明，已在脚本头部记录两步发布流程）。
+- 提交：`85d4f50`（v1.9.2 全部代码 + 文档 + 工具），已推送到 `main`。
+
 
