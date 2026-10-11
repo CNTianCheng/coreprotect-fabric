@@ -383,7 +383,7 @@ Java（`src/main/java/net/coreprotect/fabric/`）：
 | `database/DatabaseManager.java` | 保留 1.21 已有的 `closeStatements()` 位置（WAL checkpoint 之后） | 顺序差异，无功能影响 |
 | 其余 7 个文件 | `.name()`→`.getName()`、`getEntityWorld()`→`getWorld()`/`getServerWorld()`、`getOrThrow`→`getWrapperOrThrow` | 纯改名 |
 
-### 8.5 发布清单（v1.9.3 收尾状态）
+### 8.5 发布清单（v1.9.3 已完成）
 
 已完成：
 
@@ -391,7 +391,7 @@ Java（`src/main/java/net/coreprotect/fabric/`）：
 - 26.1.2 移植（mojmap 子代理，唯一非 1:1 适配）：26.1.2 没有 `ItemStack.UNCOUNTED_CODEC`，改用 `ItemStack.CODEC` 编码 `stack.copyWithCount(1)`（往返一致，库里 SNBT 多一个 `count:1`、键顺序可能不同）；其余全是改名（`NbtHelper.toNbtProviderString`→`CompoundTag.toString`、`NbtHelper.fromNbtProviderString`→`TagParser.parseCompoundFully`、`RegistryOps.of`→`create`、`RegistryWrapper.WrapperLookup`→`HolderLookup.Provider`、`DoubleInventory.isPart`→`CompoundContainer.contains`、`Inventory.isValid`→`Container.canPlaceItem`、`isChunkLoaded`→`hasChunk`、`toImmutable`→`immutable`、`BlockState.isOf(Block)`→`state.getBlock() == block`、`ChestBlock.getInventory`→`getContainer`、`getOtherEntities(null,…)`→`getEntities((Entity) null, …)`、`areItemsAndComponentsEqual`→`isSameItemSameComponents`、`getRegistryKey().getValue().toString()`→`dimension().identifier().toString()`、`isInLoadLimit`/`isDebugWorld`/`Box`/`getUuidAsString`/`isOnlineMode`/`getPlayerManager().getPlayer`、`Commands.hasPermission(f).test(source)`→`f.allows(source.getPermissions())`）。`coreprotect.mixins.json` 的 `defaultRequire` 0→1；5 个语言文件各 118 键，键集合/顺序/取值与 1.21.11 完全一致。
 - 26.1.2 保留的一处顺序差异：`database/DatabaseManager.java` 的 `close()` 仍是 WAL checkpoint 先、`closeStatements()` 后（1.21 与 26.1.2 的 v1.9.2 本来就如此，v1.9.3 diff 未触及；后果：有缓存语句时 truncating checkpoint 可能返回 SQLITE_BUSY 且异常被忽略，`-wal` 留在非空）。
 - 我在子代理收尾后补齐的两处（它启动早于这两次改动，被旧快照覆盖）：① `CoreProtectFabric.java` 的 `MOD_VERSION` 曾回到 `1.9.2` → 已改回 `1.9.3`；② M6 槽位写回未移植（`slot.grow(move)` / `slot.shrink(take)` 后没有写回）→ 已按 mojmap 补 `inv.setItem(i, slot)` 与 `inv.setItem(i, ItemStack.EMPTY)`，与另两棵树语义一致。
-- 三棵树 `build` 均 `BUILD SUCCESSFUL`，产物 `coreprotect-fabric-<mc>-1.9.3.jar`（1.21 = 14,537,102 B、1.21.11 = 14,535,449 B、26.1.2 = 14,535,994 B），jar 内 `fabric.mod.json` 的 version 三棵树都是 `1.9.3`；`javap -c` 复核三棵树 `RollbackManager` 的槽位写回调用点各 6 处（一致）。
+- 三棵树 `build` 均 `BUILD SUCCESSFUL`，产物 `coreprotect-fabric-<mc>-1.9.3.jar`（加签名命令钩子前的体积：1.21 = 14,537,102 B、1.21.11 = 14,535,449 B、26.1.2 = 14,535,994 B；最终发布体积见本节末尾），jar 内 `fabric.mod.json` 的 version 三棵树都是 `1.9.3`；`javap -c` 复核三棵树 `RollbackManager` 的槽位写回调用点各 6 处（一致）。
 - 文档：`CHANGELOG.md`（英文 + 中文，含 M6）、`.build-tools/release-v193-template.md`、三份 `release-v193-*.md`（11945 / 11963 / 11957 字符，无占位符）、`.build-tools/modrinth/changelog-1.9.3.md`。
 - 版本号：`bump-version.ps1 -From 1.9.2 -To 1.9.3` 已改三棵树的源码/README/OVERVIEW 与 `.build-tools/modrinth/versions.json`。
 - 工具链：`check-ascii.ps1` 报 55 个脚本全部纯 ASCII；`test-full.ps1` 已加入 `co lookup u:#container` 与 v1.9.3 并发用例。
@@ -407,9 +407,12 @@ Java（`src/main/java/net/coreprotect/fabric/`）：
 2. **1.21 / 1.21.11 漏记带聊天签名的命令** —— 只挂了 `executeCommand(Ljava/lang/String;)V`，而签名客户端走 `public void onChatCommandSigned(ChatCommandSignedC2SPacket)` → `private void handleCommandExecution(ChatCommandSignedC2SPacket, LastSeenMessageList)`；`javap -p -c` 反汇编证实该私有方法体内**没有** `executeCommand` 调用（它直接 `CommandManager.execute(ParseResults, String)`），所以在线模式下玩家命令此前完全没有记录。两棵树已加 `@Inject(method = "onChatCommandSigned(Lnet/minecraft/network/packet/c2s/play/ChatCommandSignedC2SPacket;)V", at = @At("RETURN"))` 并共用 `coreprotect$logCommand`；`ChatCommandSignedC2SPacket` 在 1.21 与 1.21.11 均为 record 且 `command()` 存在（javap 确认）。
 - 上述两个改动后三棵树重新 `build` 成功，jar：1.21 = 14,537,297 B、1.21.11 = 14,535,601 B、26.1.2 = 14,536,067 B；三份 notes 由 `make-notes-193.ps1` 重新生成（12799 / 12817 / 12811 字符，无占位符）；`CHANGELOG.md` 中英各加对应条目。
 
-待完成：
+已完成（发布）：
 
-1. 26.1.2 修复后的回归已通过；1.21.11 与 1.21 在补上 `onChatCommandSigned` 钩子后需再各跑一次 `test-full.ps1`（开服成功即证明两个注入都命中）。
-2. 显式路径提交（**绝不 `git add -A`、绝不 `git add .build-tools`**——该目录下 `apx-bot/node_modules`、`apx-fabric-prod`、`apx-vanilla` 等未被 ignore）。
-3. 发布：GitHub `.build-tools/release-v192.ps1 -Version 1.9.3 -PreviousTag v1.9.2`；Modrinth `.build-tools/modrinth/publish.ps1`。
-4. 自己打开 GitHub release 页与 Modrinth 版本页核对。**绝不改动 Modrinth 图标**（用户口径哈希 `6988515318bc5bcd47a6b23d003f5a18c215933f`；本地 `.build-tools/modrinth/icon.png` SHA-256 = `5df0aacd8c27dfaea01bf9dfdf815078fc46d39eb46c2f5fb3e94fd05f3f57b1`）。
+1. 三棵树回归全绿：`coreprotect-fabric-1.21.11`、`coreprotect-fabric-1.21`、`coreprotect-fabric-26.1.2` 各 `FULL_TEST_DONE`、exit 0、`MIXIN_FAILURES: no`、`CORE_ENABLED: yes`（开服成功即证明 `executeCommand` 与 `onChatCommandSigned` 两个注入都命中目标）。
+2. 提交（显式路径 138 项，**未用 `git add -A`**）：`0ca0f9b` = `v1.9.3: security, data-integrity and logging fixes (60 findings)`；随后 `a1a031c` = `release script: read the GitHub credential through a real stdin file`。远端 `main` 与 `refs/tags/v1.9.3`、`v1.9.3-mc1.21.11`、`v1.9.3-mc26.1.2` 现在都指向 `a1a031c`。
+3. GitHub 发布（`.build-tools/release-v192.ps1 -Version 1.9.3 -PreviousTag v1.9.2`）：首次失败 `git : fatal: refusing to work with credential missing protocol field`——Windows PowerShell 5.1 没有 `<` 重定向，管道又给不了 `git credential fill` 可用的 stdin（.NET `ProcessStartInfo` + `RedirectStandardInput` 也一样）。修法：把请求写进一行临时文件，用 `cmd /c "git credential fill < 文件" 2>NUL`，`finally` 里删除。之后 API 复核：三个 release `draft=False`、`prerelease=False`，各带一个资产且与本地 jar 同大小（1.21 = `coreprotect-fabric-1.21-1.9.3.jar` 14,537,297 B、1.21.11 = 14,535,601 B、26.1.2 = 14,536,067 B）；正文 12799 / 12817 / 12811 字符，都含 `ChatCommandSignedC2SPacket`。脚本用 `target_commitish=main` 建 tag，首跑时远端 `main` 还停在 `f1fd4a3` → 已 `git push origin main` 并 `git push --force` 三个 tag 指向 `a1a031c`。sha256：1.21 `06F2401E…4707`、1.21.11 `17A2FFDC…377A`、26.1.2 `5B9EEEAC…2E7C`。
+4. Modrinth 发布走已验证的两步流程（`POST /version` 的 `HTTP 405` 已知问题）：`publish.ps1 -DumpPayload`（三个 jar sha256 前缀 `06F2401E5E85` / `17A2FFDC8DC8` / `5B9EEEAC2A66`，`JarOk True`；脚本照旧不碰项目正文与图标）→ `probe6.ps1` 三次 `HTTP 200 : CREATED`，版本 id = `eldLUrfn`（1.21）、`n9YO8cwx`（1.21.11）、`vchfPTj6`（26.1.2）。
+5. 页面自查：`check.ps1` 显示项目 42 个版本，三个 1.9.3 全部 `status: listed`、`version_type: release`、`loaders: fabric`，文件大小与本地逐字节一致，`icon_url` 仍是 `.../6988515318bc5bcd47a6b23d003f5a18c215933f_96.webp`（**图标未被改动**，与用户口径一致）。发布期间项目级 `status` 显示 `processing`（新文件上传后的扫描状态；三个版本本身已 `listed`，项目 `updated` 时间等于 26.1.2 版本发布时间）。
+6. 教训：`git commit -m '...'` 里含双引号的正文会被 PowerShell 拆成 pathspec（`error: pathspec 'to' did not match any file(s)`）→ 改用 `git commit -F <临时文件>`；PS 5.1 的 `Invoke-RestMethod` 直连 `api.modrinth.com` 会拿 404，走 `.build-tools/modrinth/check.ps1`（它显式设 TLS 1.2 并带 User-Agent）即可。
+7. 图标口径（**永不改动**）：modrinth.com 上的图标哈希 `6988515318bc5bcd47a6b23d003f5a18c215933f`；本地 `.build-tools/modrinth/icon.png` 的 SHA-256 = `5df0aacd8c27dfaea01bf9dfdf815078fc46d39eb46c2f5fb3e94fd05f3f57b1`（发布流程从不传 `-SetIcon`、从不跑 `make-icon.ps1`）。
