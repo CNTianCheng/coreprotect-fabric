@@ -33,9 +33,18 @@ function Get-JarModVersion([string]$path) {
     } finally { $zip.Dispose() }
 }
 
-# Read the credential straight from a pipe: the previous shape parked the PAT in
-# %TEMP%\ghcred-out.txt and only cleaned it up best-effort.
-$cred = "protocol=https`nhost=github.com`n" | git credential fill 2>$null
+# Read the credential through a real stdin pipe: the previous shape parked the PAT in
+# %TEMP%\ghcred-out.txt and only cleaned it up best-effort. Windows PowerShell 5.1 has no
+# `<` redirection, and piping the request into `git credential fill` does not give it a
+# usable stdin (it answers "refusing to work with credential missing protocol field"),
+# hence the one-line request file that is deleted again immediately.
+$credFile = Join-Path $env:TEMP ("ghcred-in-" + [System.Guid]::NewGuid().ToString('N') + ".txt")
+[System.IO.File]::WriteAllText($credFile, "protocol=https`nhost=github.com`n")
+try {
+    $cred = & cmd /c "git credential fill < `"$credFile`" 2>NUL"
+} finally {
+    Remove-Item -LiteralPath $credFile -Force -ErrorAction SilentlyContinue
+}
 $tokenLine = ($cred -split "`n" | Where-Object { $_ -like 'password=*' } | Select-Object -First 1)
 if (-not $tokenLine) { throw 'no github credential available from git credential fill' }
 $headers = @{ 'Authorization' = "Bearer $($tokenLine.Substring(9).Trim())"; 'User-Agent' = 'coreprotect-release' }
