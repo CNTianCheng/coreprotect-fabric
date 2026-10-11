@@ -23,8 +23,8 @@
     "coreprotect.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.16.0",
-    "fabric-api": "*",
+    "fabricloader": ">=0.19.3",
+    "fabric-api": ">=0.155.2+26.1.2",
     "minecraft": "26.1.2",
     "java": ">=25"
   }

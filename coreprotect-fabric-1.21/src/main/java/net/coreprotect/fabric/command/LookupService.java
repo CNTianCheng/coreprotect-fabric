@@ -4,6 +4,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 import com.google.gson.Gson;
@@ -15,6 +19,7 @@ import net.coreprotect.fabric.i18n.Translator;
 import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.Messages;
 import net.coreprotect.fabric.util.TimeUtil;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.MutableText;
@@ -48,29 +53,61 @@ public final class LookupService {
     }
 
     /**
+     * How long a console/RCON/command-block command waits for its query. Their output buffer
+     * is flushed the moment the command returns, so the result has to be ready before then -
+     * but waiting unconditionally kept the server thread busy for as long as the query ran
+     * (/co purge t:30d could hold it for up to 60 s). Past this limit the command answers
+     * "still running" and the late result is delivered to the log through the callback.
+     */
+    private static final long CONSOLE_TIMEOUT_MS = 10_000L;
+
+    /**
      * Runs a query for a command and hands the result to {@code callback}.
      *
      * <p>Players get the non-blocking path: the query runs on the read pool and the callback
      * is invoked on the server thread when it is ready, so a large lookup never stalls a
      * tick. Console, RCON and command-block sources only receive output while the command is
-     * still executing (their output buffer is flushed when it returns), so for them the
-     * query runs inline and the callback fires before this returns.
+     * still executing, so for them the query is awaited inline - with a time limit.
      */
     public static <T> void query(ServerCommandSource source, Callable<T> task, Consumer<T> callback) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
+        DatabaseManager db = mod.database();
         if (source != null && source.getPlayer() != null) {
-            mod.database().submitRead(task, callback);
+            db.submitRead(task, callback);
             return;
         }
-        T result;
-        try {
-            result = task.call();
-        } catch (Exception e) {
-            CoreProtectFabric.LOGGER.warn("[CoreProtect] Query failed: {}", e.toString());
-            result = null;
+        CompletableFuture<T> future = db.submitReadFuture(task);
+        if (future == null) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Query dropped - the database is shutting down.");
+            callback.accept(null);
+            return;
         }
-        callback.accept(result);
+        try {
+            callback.accept(future.get(CONSOLE_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        } catch (TimeoutException e) {
+            Messages.error(source, "coreprotect.error.db",
+                    "the query is still running - its result will follow in the server log");
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Command answered after waiting {} ms for a"
+                    + " query that is still running; the result will be logged when it is ready.",
+                    CONSOLE_TIMEOUT_MS);
+            future.thenAccept(value -> {
+                MinecraftServer server = mod.server();
+                if (server != null) {
+                    server.execute(() -> callback.accept(value));
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            // A console/RCON command that returns without calling back prints nothing at all, so the
+            // interrupted query is reported like a failure instead of silently dropping the output.
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Interrupted while waiting for a query;"
+                    + " the command prints no result.", e);
+            callback.accept(null);
+        } catch (ExecutionException e) {
+            // a failed query surfaces as a null result (see DatabaseManager#readFailed)
+            callback.accept(null);
+        }
     }
 
     public static int run(ServerCommandSource source, Criteria c) {
@@ -145,7 +182,9 @@ public final class LookupService {
             Messages.send(source, row);
         }
         if (rows.size() >= pageSize) {
-            Messages.footer(source, buildLookupCommand(c, c.page + 1), "coreprotect.lookup.footer", c.page + 1);
+            // p: is clamped by ParamParser, but a footer must never suggest a negative page
+            int nextPage = c.page >= Integer.MAX_VALUE ? Integer.MAX_VALUE : c.page + 1;
+            Messages.footer(source, buildLookupCommand(c, nextPage), "coreprotect.lookup.footer", nextPage);
         }
     }
 
@@ -329,7 +368,33 @@ public final class LookupService {
                 .append(Text.literal(" ").formatted(Formatting.WHITE))
                 .append(Text.literal(user).formatted(Formatting.DARK_AQUA))
                 .append(Text.literal(": ").formatted(Formatting.WHITE))
-                .append(Text.literal(message).formatted(Formatting.WHITE));
+                .append(Text.literal(plain(message)).formatted(Formatting.WHITE));
+    }
+
+    /**
+     * Strips legacy formatting codes ({@code §x}) and control characters from recorded,
+     * player-written text. Chat, commands and sign lines are stored verbatim, so a player
+     * could otherwise forge a "CoreProtect" line inside a lookup result or hide text behind
+     * a colour reset. Control characters never belong in a chat line.
+     */
+    static String plain(String text) {
+        if (text == null || text.isEmpty()) return text;
+        StringBuilder sb = null;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            boolean bad = ch == '\u00a7' || ch == '\u007f' || (ch < 0x20 && ch != '\n' && ch != '\t');
+            if (!bad) {
+                if (sb != null) sb.append(ch);
+                continue;
+            }
+            if (sb == null) {
+                sb = new StringBuilder(text.length());
+                sb.append(text, 0, i);
+            }
+            // a § code swallows the character that follows it as well
+            if (ch == '\u00a7' && i + 1 < text.length()) i++;
+        }
+        return sb == null ? text : sb.toString();
     }
 
     /** {@code ----- <dark aqua>CoreProtect | Lookup Results</dark aqua> -----}, as in the plugin. */
@@ -376,7 +441,8 @@ public final class LookupService {
             if (line != null && !line.isBlank()) nonBlank.add(line);
         }
         if (nonBlank.isEmpty()) return null;
-        String text = String.join(" | ", nonBlank);
+        // sign lines are player-written too: strip formatting codes before showing them
+        String text = plain(String.join(" | ", nonBlank));
         return BlockStateUtil.signIsBack(meta) ? text + " (back)" : text;
     }
 

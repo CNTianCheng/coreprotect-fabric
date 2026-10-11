@@ -21,13 +21,9 @@ $supersededBy = @{
     'v1.0.0-mc26.1.2'    = 'v1.8.2-mc26.1.2'
 }
 
-$inFile = Join-Path $env:TEMP 'ghcred-in.txt'
-$outFile = Join-Path $env:TEMP 'ghcred-out.txt'
-$errFile = Join-Path $env:TEMP 'ghcred-err.txt'
-[System.IO.File]::WriteAllText($inFile, "protocol=https`nhost=github.com`n`n", [System.Text.Encoding]::ASCII)
-Start-Process -FilePath 'git' -ArgumentList 'credential', 'fill' -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -Wait
-$cred = [System.IO.File]::ReadAllText($outFile)
-Remove-Item $inFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+# Read the credential straight from a pipe: the previous shape parked the PAT in
+# %TEMP%\ghcred-out.txt and only cleaned it up best-effort.
+$cred = "protocol=https`nhost=github.com`n" | git credential fill 2>$null
 $tokenLine = ($cred -split "`n" | Where-Object { $_ -like 'password=*' } | Select-Object -First 1)
 $headers = @{ 'Authorization' = "Bearer $($tokenLine.Substring(9).Trim())"; 'User-Agent' = 'cp-repair' }
 $repo = 'CNTianCheng/coreprotect-fabric'

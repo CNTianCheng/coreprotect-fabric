@@ -10,6 +10,11 @@ import net.coreprotect.fabric.util.TimeUtil;
  */
 public final class ParamParser {
 
+    /** Largest accepted r: radius (blocks). */
+    static final int MAX_RADIUS = 1000;
+    /** Largest accepted p: page number. */
+    static final int MAX_PAGE = 1000;
+
     private ParamParser() {
     }
 
@@ -69,14 +74,18 @@ public final class ParamParser {
                     case "r" -> {
                         Integer r = parseInt(v);
                         if (r == null || r <= 0) return ParseResult.error("coreprotect.error.invalid_radius", v);
-                        c.radius = r;
+                        // r: was only checked for being positive, so r:2147483647 made the
+                        // distance filter scan and compare the whole database.
+                        c.radius = Math.min(r, MAX_RADIUS);
                     }
                     case "b" -> c.block = v.toLowerCase();
                     case "e" -> c.exclude = v.toLowerCase();
                     case "p" -> {
                         Integer p = parseInt(v);
                         if (p == null || p <= 0) return ParseResult.error("coreprotect.error.invalid_page", v);
-                        c.page = p;
+                        // A page number is used as a SQL OFFSET: unbounded values only waste
+                        // a full scan (and p == Integer.MAX_VALUE overflowed the page footer).
+                        c.page = Math.min(p, MAX_PAGE);
                     }
                     default -> {
                         return ParseResult.error("coreprotect.error.invalid_param", token);

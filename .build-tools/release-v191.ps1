@@ -1,15 +1,16 @@
+# Historical one-off: it re-uploads the v1.9.1 assets from <tree>\build\libs, which by now
+# holds a newer build. Disabled unless a rerun is explicitly requested.
+param([switch]$AllowHistoricalRerun)
 $ErrorActionPreference = 'Stop'
+if (-not $AllowHistoricalRerun) {
+    throw 'release-v191.ps1 is a historical release script and is disabled; use release-v192.ps1 -Version <version> for a new release, or pass -AllowHistoricalRerun to redo this one.'
+}
 $root = Split-Path $PSScriptRoot -Parent
 # non-ASCII text lives in UTF-8 data files: Windows PowerShell reads .ps1 files as ANSI
 $supersededText = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'repair\superseded.txt'), [System.Text.Encoding]::UTF8)).TrimEnd("`r", "`n")
-# ask git for the stored github.com credential (works without gh CLI)
-$inFile = Join-Path $env:TEMP 'ghcred-in.txt'
-$outFile = Join-Path $env:TEMP 'ghcred-out.txt'
-$errFile = Join-Path $env:TEMP 'ghcred-err.txt'
-[System.IO.File]::WriteAllText($inFile, "protocol=https`nhost=github.com`n`n", [System.Text.Encoding]::ASCII)
-Start-Process -FilePath 'git' -ArgumentList 'credential', 'fill' -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -Wait
-$cred = [System.IO.File]::ReadAllText($outFile)
-Remove-Item $inFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+# Read the credential straight from a pipe: the previous shape parked the PAT in
+# %TEMP%\ghcred-out.txt and only cleaned it up best-effort.
+$cred = "protocol=https`nhost=github.com`n" | git credential fill 2>$null
 $tokenLine = ($cred -split "`n" | Where-Object { $_ -like 'password=*' } | Select-Object -First 1)
 if (-not $tokenLine) { throw 'no github credential available from git credential fill' }
 $headers = @{ 'Authorization' = "Bearer $($tokenLine.Substring(9).Trim())"; 'User-Agent' = 'coreprotect-release' }

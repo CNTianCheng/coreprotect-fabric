@@ -92,16 +92,33 @@ public final class BlockEventListener {
         }
 
         BlockPos clicked = hit.getBlockPos();
-        BlockState clickedState = world.getBlockState(clicked);
         BlockEntity be = world.getBlockEntity(clicked);
-        ItemStack stack = sp.getStackInHand(hand);
 
-        if (stack.getItem() instanceof BlockItem item) {
-            boolean interacts = be instanceof Inventory && !sp.isSneaking();
-            if (!interacts) {
-                BlockPos candidate = clickedState.isReplaceable() ? clicked : clicked.offset(hit.getSide());
-                Block placedBlock = item.getBlock();
-                world.getServer().execute(() -> deferredPlace(sp, (ServerWorld) world, candidate, placedBlock));
+        // E12: not only BlockItems change the world (water/lava buckets, flint and steel,
+        // bone meal, hoes, axes, shovels, ...), so the decision is made from the state of the
+        // touched positions BEFORE the interaction instead of from the held item, and the
+        // record keeps the state that was really replaced instead of a hard-coded "air".
+        // E14: comparing the block type afterwards alone is not enough either - right-clicking
+        // a chest while holding a block leaves the clicked block unchanged and used to be
+        // recorded as a phantom "+stone".
+        boolean interacts = be instanceof Inventory && !sp.isSneaking();
+        if (!interacts) {
+            // Vanilla places into the clicked position when it is replaceable and into the
+            // position in front of it otherwise; items such as a hoe, an axe, shears or bone
+            // meal act on the clicked position itself, so both are watched.
+            BlockPos front = clicked.offset(hit.getSide());
+            BlockPos[] positions = front.equals(clicked) ? new BlockPos[]{clicked}
+                    : new BlockPos[]{clicked, front};
+            BlockState[] before = new BlockState[positions.length];
+            boolean touched = false;
+            for (int i = 0; i < positions.length; i++) {
+                before[i] = world.getBlockState(positions[i]);
+                touched |= before[i].isAir() || before[i].isReplaceable();
+            }
+            if (touched) {
+                // World#getServer().execute() queues the task until the current server task
+                // (this interaction) is done, so the follow-up sees the applied change.
+                world.getServer().execute(() -> deferredPlace(sp, (ServerWorld) world, positions, before));
             }
         }
 
@@ -111,25 +128,32 @@ public final class BlockEventListener {
         return ActionResult.PASS;
     }
 
-    private static void deferredPlace(ServerPlayerEntity player, ServerWorld world, BlockPos candidate, Block placedBlock) {
+    private static void deferredPlace(ServerPlayerEntity player, ServerWorld world, BlockPos[] positions, BlockState[] before) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
-        BlockState now = world.getBlockState(candidate);
-        if (now.getBlock() != placedBlock) return; // interaction was cancelled, or the item is not a block
-        if (mod.config().logging.block) {
-            BlockEntity be = world.getBlockEntity(candidate);
-            mod.database().insertBlockAsync(new DatabaseManager.BlockLog(
-                    0, TimeUtil.now(), player.getGameProfile().name(),
-                    world.getRegistryKey().getValue().toString(),
-                    candidate.getX(), candidate.getY(), candidate.getZ(),
-                    DatabaseManager.TYPE_PLACE,
-                    BlockStateUtil.stringify(Blocks.AIR.getDefaultState()),
-                    BlockStateUtil.stringify(now),
-                    "+",
-                    BlockStateUtil.signTextToJson(be)));
-        }
-        if (mod.inspector().isInspecting(player)) {
-            mod.inspector().lookupForBlock(player, placedBlock);
+        for (int i = 0; i < positions.length; i++) {
+            BlockPos pos = positions[i];
+            BlockState oldState = before[i];
+            BlockState now = world.getBlockState(pos);
+            // E14: nothing changed, or only the block state changed (a door opening, a lever
+            // flipping, a cauldron filling, ...) - that is not a placement.
+            if (now.equals(oldState) || now.getBlock() == oldState.getBlock()) continue;
+            Block placed = now.getBlock();
+            if (mod.config().logging.block) {
+                BlockEntity be = world.getBlockEntity(pos);
+                mod.database().insertBlockAsync(new DatabaseManager.BlockLog(
+                        0, TimeUtil.now(), player.getGameProfile().name(),
+                        world.getRegistryKey().getValue().toString(),
+                        pos.getX(), pos.getY(), pos.getZ(),
+                        DatabaseManager.TYPE_PLACE,
+                        BlockStateUtil.stringify(oldState),
+                        BlockStateUtil.stringify(now),
+                        "+",
+                        BlockStateUtil.signTextToJson(be)));
+            }
+            if (mod.inspector().isInspecting(player)) {
+                mod.inspector().lookupForBlock(player, placed);
+            }
         }
     }
 }

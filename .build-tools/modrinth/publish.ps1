@@ -38,14 +38,13 @@
         powershell -File .build-tools\modrinth\publish.ps1 -DumpPayload
         powershell -File .build-tools\modrinth\probe6.ps1
 
-    probe6 uploads payload-1 twice (once with an explicit Content-Type, once without) as a
-    leftover of the original diagnosis, so the first 1.21 version it creates has to be
-    deleted afterwards:
+    probe6.ps1 sends every payload exactly once, with the default Content-Type on the file
+    part (the shape that was answered with 200); the duplicate diagnostic upload that used
+    to create a second 1.21 version on every release is gone.
 
-        DeleteAsync("https://api.modrinth.com/v2/version/<the extra id>")
-
-    Publishing the project page (title, description, body) still goes through
-    publish.ps1 -UpdateProject -TitleBodyOnly, which does work.
+    The retry loop below re-lists the project versions before every retry: POST /version is
+    not idempotent, and "the response was lost on the way back" is indistinguishable from
+    "the upload was rejected" at the call site.
 #>
 [CmdletBinding()]
 param(
@@ -220,21 +219,68 @@ if ($DryRun) { Write-Host 'mode     : DRY RUN - nothing will be uploaded' }
 
 # ---------------------------------------------------------------- plan
 
+# Reads the version string out of fabric.mod.json inside a built jar.
+function Get-JarModVersion([string]$path) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($path)
+    try {
+        $entry = $zip.Entries | Where-Object { $_.FullName -eq 'fabric.mod.json' } | Select-Object -First 1
+        if (-not $entry) { throw "$path does not contain fabric.mod.json" }
+        $reader = New-Object System.IO.StreamReader($entry.Open())
+        try { return ([string](($reader.ReadToEnd() | ConvertFrom-Json).version)).Trim() }
+        finally { $reader.Dispose() }
+    } finally { $zip.Dispose() }
+}
+
+# A stale jar in build/libs would otherwise be published as the new version, so every jar is
+# checked before anything is uploaded: its SHA-256, the version compiled into it, the tree's
+# gradle.properties and the freshness of the surrounding sources.
 $plan = @()
 foreach ($v in $versions) {
-    $jarPath = Join-Path $Root ($v.file -replace '/', '\')
+    $jarRel = [string]$v.file
+    $projectDir = ($jarRel -split '/')[0]
+    $jarPath = Join-Path $Root ($jarRel -replace '/', '\')
     $srcPath = $null
     if ($v.sources) { $srcPath = Join-Path $Root ($v.sources -replace '/', '\') }
     $jarOk = Test-Path -LiteralPath $jarPath
     $srcOk = ($srcPath -and (Test-Path -LiteralPath $srcPath))
     $sizeMb = 0
-    if ($jarOk) { $sizeMb = [math]::Round((Get-Item -LiteralPath $jarPath).Length / 1MB, 2) }
+    $shaShort = ''
+    $shaFull = ''
+    $jarVersion = ''
+    $treeVersion = ''
+    $stale = ''
+    if ($jarOk) {
+        $jar = Get-Item -LiteralPath $jarPath
+        $sizeMb = [math]::Round($jar.Length / 1MB, 2)
+        $shaFull = (Get-FileHash -LiteralPath $jarPath -Algorithm SHA256).Hash
+        $shaShort = $shaFull.Substring(0, 12)
+        $jarVersion = Get-JarModVersion $jarPath
+        $gpPath = Join-Path $Root (Join-Path $projectDir 'gradle.properties')
+        if (Test-Path -LiteralPath $gpPath) {
+            $m = [regex]::Match((Read-Utf8 $gpPath), '(?m)^mod_version=(.*)$')
+            if ($m.Success) { $treeVersion = $m.Groups[1].Value.Trim() }
+        }
+        $sources = @(Get-ChildItem -LiteralPath (Join-Path $Root (Join-Path $projectDir 'src')) -Recurse -File -ErrorAction SilentlyContinue)
+        foreach ($extra in @('build.gradle', 'gradle.properties')) {
+            $p = Join-Path $Root (Join-Path $projectDir $extra)
+            if (Test-Path -LiteralPath $p) { $sources += Get-Item -LiteralPath $p }
+        }
+        $newest = $sources | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        if ($newest -and $newest.LastWriteTimeUtc -gt $jar.LastWriteTimeUtc) {
+            $stale = "$($newest.FullName) is newer than the jar"
+        }
+    }
     $plan += [pscustomobject]@{
         Version = $v.version_number
         Mc      = ($v.game_versions -join ',')
         Jar     = $jarPath
         JarOk   = $jarOk
         SizeMb  = $sizeMb
+        JarVer  = $jarVersion
+        TreeVer = $treeVersion
+        Sha256  = $shaShort
+        Stale   = $stale
         Sources = $srcOk
     }
 }
@@ -242,6 +288,20 @@ $plan | Format-Table -AutoSize | Out-String | Write-Host
 
 $missing = @($plan | Where-Object { -not $_.JarOk })
 if ($missing.Count -gt 0) { throw "missing jar file(s): $(($missing | ForEach-Object { $_.Jar }) -join '; ')" }
+
+$mismatch = @($plan | Where-Object { $_.JarVer -ne $_.Version })
+if ($mismatch.Count -gt 0) {
+    throw "jar/version mismatch: $(($mismatch | ForEach-Object { "$($_.Jar) was built as '$($_.JarVer)' but versions.json says '$($_.Version)'" }) -join '; ')"
+}
+$drift = @($plan | Where-Object { $_.TreeVer -and $_.TreeVer -ne $_.Version })
+if ($drift.Count -gt 0) {
+    throw "gradle.properties/versions.json drift: $(($drift | ForEach-Object { "$($_.Jar): the tree has mod_version=$($_.TreeVer) while versions.json says $($_.Version)" }) -join '; ')"
+}
+$stalePlan = @($plan | Where-Object { $_.Stale })
+if ($stalePlan.Count -gt 0) {
+    throw "stale jar(s) - rebuild before publishing: $(($stalePlan | ForEach-Object { "$($_.Jar): $($_.Stale)" }) -join '; ')"
+}
+Write-Host ("jars verified: {0}" -f (($plan | ForEach-Object { "$($_.Version) mc=$($_.Mc) $($_.SizeMb)MB sha256:$($_.Sha256)" }) -join ' | '))
 
 if ($DryRun) {
     Write-Host '--- project payload (create) ---'
@@ -450,12 +510,28 @@ foreach ($v in $versions) {
         $result = Send-Multipart -Path '/version' -Json $json -Files $files
         if ($result.Status -ge 200 -and $result.Status -lt 300) { break }
         Write-Host "  attempt $attempt -> HTTP $($result.Status): $($result.Text)"
+        # POST /version is not idempotent: a response lost on the way back looks exactly like
+        # a rejected upload, so ask the API what it actually has before trying again. If the
+        # version is already there, this attempt succeeded - retrying would duplicate it.
+        $recheck = @()
+        try { $recheck = @(Invoke-Api -Method 'Get' -Path "/project/$projectId/version") } catch { $recheck = @() }
+        $hit = @($recheck | Where-Object { "$($_.version_number)|$((@($_.game_versions) | Sort-Object) -join ',')" -eq $key })
+        if ($hit.Count -gt 0) {
+            Write-Host "  already created by that attempt: $($hit[0].id)"
+            $result = @{ Status = 200; Text = ($hit[0] | ConvertTo-Json -Depth 12 -Compress) }
+            break
+        }
         if ($attempt -lt 3) { Start-Sleep -Seconds 20 }
     }
     if ($result.Status -lt 200 -or $result.Status -ge 300) {
+        # Do not carry on with the remaining builds: a project that has 1.21 updated but not
+        # 26.1.2 is harder to recover from than a visible failure.
         Write-Host "  FAILED (HTTP $($result.Status)): $($result.Text)"
         $summary += [pscustomobject]@{ Version = $v.version_number; Result = "failed HTTP $($result.Status)" }
-        continue
+        Write-Host ''
+        Write-Host '== summary =='
+        $summary | Format-Table -AutoSize | Out-String | Write-Host
+        throw "version upload failed (HTTP $($result.Status)); the remaining builds were NOT published"
     }
     $publishedVersion = $result.Text | ConvertFrom-Json
     Write-Host "  ok       : $($publishedVersion.id)"

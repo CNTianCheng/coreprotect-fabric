@@ -20,10 +20,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -56,12 +58,22 @@ public final class DatabaseManager {
     }
 
     public record ContainerLog(long id, long time, String user, String wid, int x, int y, int z,
-                               int type, String data, int amount) {
+                               int type, String data, int amount, String nbt) {
+        /** Backwards-compatible constructor for rows logged before {@code nbt} existed. */
+        public ContainerLog(long id, long time, String user, String wid, int x, int y, int z,
+                            int type, String data, int amount) {
+            this(id, time, user, wid, x, y, z, type, data, amount, null);
+        }
     }
 
-    /** Item drops ({@code -}) and pickups ({@code +}). */
+    /** Item drops ({@code -}) and pickups ({@code +}). {@code nbt} carries the data components. */
     public record ItemLog(long id, long time, String user, String wid, int x, int y, int z,
-                          String action, String data, int amount) {
+                          String action, String data, int amount, String nbt) {
+        /** Backwards-compatible constructor for rows logged before {@code nbt} existed. */
+        public ItemLog(long id, long time, String user, String wid, int x, int y, int z,
+                       String action, String data, int amount) {
+            this(id, time, user, wid, x, y, z, action, data, amount, null);
+        }
     }
 
     /** Sign text edits; {@code data} is the JSON of the new front lines. */
@@ -94,10 +106,10 @@ public final class DatabaseManager {
             "CREATE TABLE IF NOT EXISTS co_block (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, old_id INTEGER, new_id INTEGER, action_id INTEGER, meta TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_block_pos ON co_block(wid_id, x, y, z)",
             "CREATE INDEX IF NOT EXISTS idx_block_time ON co_block(time, name_id)",
-            "CREATE TABLE IF NOT EXISTS co_container (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, data_id INTEGER, amount INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS co_container (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type INTEGER NOT NULL, data_id INTEGER, amount INTEGER NOT NULL, nbt TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_container_pos ON co_container(wid_id, x, y, z)",
             "CREATE INDEX IF NOT EXISTS idx_container_time ON co_container(time, name_id)",
-            "CREATE TABLE IF NOT EXISTS co_item (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, action_id INTEGER, data_id INTEGER, amount INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS co_item (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, action_id INTEGER, data_id INTEGER, amount INTEGER NOT NULL, nbt TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_item_pos ON co_item(wid_id, x, y, z)",
             "CREATE INDEX IF NOT EXISTS idx_item_time ON co_item(time, name_id)",
             "CREATE TABLE IF NOT EXISTS co_sign (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data TEXT NOT NULL)",
@@ -129,17 +141,29 @@ public final class DatabaseManager {
     private static final String[] COUNT_TABLES = {
             "co_block", "co_container", "co_item", "co_sign", "co_entity", "co_session", "co_command", "co_chat"};
 
-    private final java.util.concurrent.ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "CoreProtect-DB");
-        t.setDaemon(true);
-        return t;
-    });
-    private final int readThreads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
-    private final ExecutorService readPool = Executors.newFixedThreadPool(readThreads, r -> {
-        Thread t = new Thread(r, "CoreProtect-Read");
-        t.setDaemon(true);
-        return t;
-    });
+    private static final int READ_THREADS = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+
+    /** How long {@link #close()} waits for the writer thread before it gives up and interrupts it. */
+    private static final int CLOSE_TIMEOUT_SECONDS = 30;
+
+    /** Bounds the final drain: a batch that keeps failing must not keep the shutdown spinning. */
+    private static final long DRAIN_TIMEOUT_NANOS = 30_000_000_000L;
+    private static final int DRAIN_MAX_FAILURES = 3;
+
+    /** Overall budget for the per-table counts, so {@code /co status} cannot stall for minutes. */
+    private static final long COUNTS_BUDGET_NANOS = 20_000_000_000L;
+    private static final int COUNT_QUERY_TIMEOUT_SECONDS = 5;
+
+    /**
+     * The single writer thread. Not final: after a {@link #close()} (a {@code /co reload} that
+     * reloads the config, or a failed open) the executors are shut down, and reopening the
+     * database has to start fresh ones instead of silently rejecting every task.
+     */
+    private ScheduledExecutorService worker = newWriter();
+    /** Parallel read pool, replaced together with the writer thread. */
+    private ExecutorService readPool = newReadPool();
+    /** True while the current thread is a read-pool worker (same-pool nesting would deadlock). */
+    private final ThreadLocal<Boolean> poolReader = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private final ThreadLocal<Object[]> readHolder = new ThreadLocal<>();
     /** Every open read connection, so they can all be closed before the database file is moved. */
     private final Set<Connection> readConnections = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -189,6 +213,42 @@ public final class DatabaseManager {
     private final AtomicLong committedBatches = new AtomicLong();
     /** Reused prepared statements (writer thread only). */
     private final Map<String, PreparedStatement> statements = new HashMap<>();
+    /** Non-zero while the last batch failed: wait this long before retrying instead of spinning. */
+    private volatile long flushRetryMs;
+
+    private static ScheduledExecutorService newWriter() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "CoreProtect-DB");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    private static ExecutorService newReadPool() {
+        return Executors.newFixedThreadPool(READ_THREADS, r -> {
+            Thread t = new Thread(r, "CoreProtect-Read");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    /** Restarts the executors when a previous {@link #close()} shut them down (used by open()). */
+    private void ensureExecutors() {
+        boolean restarted = false;
+        if (worker.isShutdown()) {
+            worker = newWriter();
+            restarted = true;
+        }
+        if (readPool.isShutdown()) {
+            readPool = newReadPool();
+            restarted = true;
+        }
+        if (restarted) {
+            // a flush scheduled on the old executor is gone; allow a new one to be queued
+            flushScheduled.set(false);
+            flushRetryMs = 0;
+        }
+    }
 
     public boolean isOpen() {
         return open;
@@ -214,6 +274,7 @@ public final class DatabaseManager {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to create database directory", e);
         }
         CoreProtectFabric.LOGGER.info("[CoreProtect] Using database file: {}", dbPath);
+        ensureExecutors();
         try {
             // The one-time v1->v2 migration may take a while on large databases; wait patiently.
             worker.submit(() -> {
@@ -231,6 +292,9 @@ public final class DatabaseManager {
         if (legacyMigrated) {
             // rebuild the file in the background so the dropped text columns actually free disk space
             vacuumAsync();
+        }
+        if (!writeQueue.isEmpty()) {
+            scheduleFlush(0); // rows queued before a close/reopen are still waiting
         }
         scheduleCheckpoints();
         scheduleBackups();
@@ -251,6 +315,16 @@ public final class DatabaseManager {
             st.execute("PRAGMA auto_vacuum=INCREMENTAL");
             for (String ddl : DDL_V3) {
                 st.executeUpdate(ddl);
+            }
+            // Databases created before container rows carried item data components are widened here;
+            // without the column a rollback cannot restore an enchanted or filled stack.
+            if (!hasColumn(c, "co_container", "nbt")) {
+                st.executeUpdate("ALTER TABLE co_container ADD COLUMN nbt TEXT");
+            }
+            // Same for dropped items: without the components, undoing a rollback of an enchanted or
+            // filled drop could only rebuild a plain stack of the item.
+            if (!hasColumn(c, "co_item", "nbt")) {
+                st.executeUpdate("ALTER TABLE co_item ADD COLUMN nbt TEXT");
             }
             if (version < 3) {
                 st.executeUpdate("PRAGMA user_version=3");
@@ -642,17 +716,16 @@ public final class DatabaseManager {
                     }
                     conn = null;
                 }
-            }).get(5, TimeUnit.MINUTES);
+            }).get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
-            CoreProtectFabric.LOGGER.warn("[CoreProtect] Database close task did not finish cleanly: {}", e.toString());
-            closeStatements();
-            if (conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException ignored) {
-                }
-                conn = null;
-            }
+            // Never touch the connection from this thread: the writer thread may still be inside
+            // it, and closing statements/connection underneath a running task is what produced
+            // "database has been closed" errors. The file lock goes away with the JVM.
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Database close task did not finish within {} s; "
+                    + "rows may still be queued: {}", CLOSE_TIMEOUT_SECONDS, e.toString());
+            // A writer that is stuck inside a failing batch has to be interrupted: shutdown() only
+            // stops accepting tasks, so the awaitTermination below used to run into its own timeout.
+            worker.shutdownNow();
         }
         worker.shutdown();
         try {
@@ -660,13 +733,15 @@ public final class DatabaseManager {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        closeReadConnections();
+        // The read pool is stopped before its connections are closed: closing a connection that
+        // a reader thread is still using made that (harmless) query fail with a SQL error.
         readPool.shutdown();
         try {
             readPool.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        closeReadConnections();
     }
 
     /**
@@ -710,9 +785,9 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long dataId = stateId(l.data());
             try {
-                PreparedStatement ps = prepare("INSERT INTO co_container(time,name_id,wid_id,x,y,z,type,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)");
+                PreparedStatement ps = prepare("INSERT INTO co_container(time,name_id,wid_id,x,y,z,type,data_id,amount,nbt) VALUES(?,?,?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
-                        l.type(), dataId, l.amount()));
+                        l.type(), dataId, l.amount(), l.nbt()));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_container", e);
@@ -725,9 +800,9 @@ public final class DatabaseManager {
         submitWrite(() -> {
             long dataId = stateId(l.data());
             try {
-                PreparedStatement ps = prepare("INSERT INTO co_item(time,name_id,wid_id,x,y,z,action_id,data_id,amount) VALUES(?,?,?,?,?,?,?,?,?)");
+                PreparedStatement ps = prepare("INSERT INTO co_item(time,name_id,wid_id,x,y,z,action_id,data_id,amount,nbt) VALUES(?,?,?,?,?,?,?,?,?,?)");
                 bind(ps, Arrays.asList(l.time(), nameId(l.user()), worldId(l.wid()), l.x(), l.y(), l.z(),
-                        actionId(l.action()), dataId, l.amount()));
+                        actionId(l.action()), dataId, l.amount(), l.nbt()));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_item", e);
@@ -915,7 +990,7 @@ public final class DatabaseManager {
     public List<ContainerLog> queryContainers(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount "
+                    "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount,c.nbt "
                             + "FROM co_container c LEFT JOIN co_state s ON s.id=c.data_id "
                             + "LEFT JOIN co_name n ON n.id=c.name_id LEFT JOIN co_world w ON w.id=c.wid_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
@@ -930,7 +1005,7 @@ public final class DatabaseManager {
                     while (rs.next()) {
                         out.add(new ContainerLog(rs.getLong(1), rs.getLong(2), rs.getString(3), rs.getString(4),
                                 rs.getInt(5), rs.getInt(6), rs.getInt(7), rs.getInt(8),
-                                rs.getString(9), rs.getInt(10)));
+                                rs.getString(9), rs.getInt(10), rs.getString(11)));
                     }
                     return out;
                 }
@@ -940,7 +1015,7 @@ public final class DatabaseManager {
 
     public List<ContainerLog> queryContainerHistory(String wid, int x, int y, int z, int limit) {
         return executeRead(() -> {
-            String sql = "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount FROM co_container c "
+            String sql = "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount,c.nbt FROM co_container c "
                     + "LEFT JOIN co_state s ON s.id=c.data_id "
                     + "LEFT JOIN co_name n ON n.id=c.name_id LEFT JOIN co_world w ON w.id=c.wid_id "
                     + "WHERE c.wid_id=(SELECT id FROM co_world WHERE wid=?) AND c.x=? AND c.y=? AND c.z=? "
@@ -952,7 +1027,7 @@ public final class DatabaseManager {
                     while (rs.next()) {
                         out.add(new ContainerLog(rs.getLong(1), rs.getLong(2), rs.getString(3), rs.getString(4),
                                 rs.getInt(5), rs.getInt(6), rs.getInt(7), rs.getInt(8),
-                                rs.getString(9), rs.getInt(10)));
+                                rs.getString(9), rs.getInt(10), rs.getString(11)));
                     }
                     return out;
                 }
@@ -963,7 +1038,7 @@ public final class DatabaseManager {
     public List<ItemLog> queryItems(Criteria c, long limit, long offset) {
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
-                    "SELECT i.id,i.time,n.name,w.wid,i.x,i.y,i.z,ac.action,s.state,i.amount "
+                    "SELECT i.id,i.time,n.name,w.wid,i.x,i.y,i.z,ac.action,s.state,i.amount,i.nbt "
                             + "FROM co_item i LEFT JOIN co_state s ON s.id=i.data_id "
                             + "LEFT JOIN co_name n ON n.id=i.name_id LEFT JOIN co_world w ON w.id=i.wid_id "
                             + "LEFT JOIN co_action ac ON ac.id=i.action_id WHERE 1=1");
@@ -984,7 +1059,8 @@ public final class DatabaseManager {
                     List<ItemLog> out = new ArrayList<>();
                     while (rs.next()) {
                         out.add(new ItemLog(rs.getLong(1), rs.getLong(2), rs.getString(3), rs.getString(4),
-                                rs.getInt(5), rs.getInt(6), rs.getInt(7), rs.getString(8), rs.getString(9), rs.getInt(10)));
+                                rs.getInt(5), rs.getInt(6), rs.getInt(7), rs.getString(8), rs.getString(9),
+                                rs.getInt(10), rs.getString(11)));
                     }
                     return out;
                 }
@@ -1138,24 +1214,39 @@ public final class DatabaseManager {
         return 0;
     }
 
-    /** Runs all eight table counts in parallel on the read pool. */
+    /** Runs all eight table counts in parallel on the read pool. A failed table reports {@code -1}. */
     public long[] counts() {
+        if (Boolean.TRUE.equals(poolReader.get())) {
+            return countsSequential(); // already on a read worker: never submit to our own pool
+        }
         List<Future<Long>> futures = new ArrayList<>();
         for (String table : COUNT_TABLES) {
-            futures.add(readPool.submit(() -> {
+            futures.add(readPool.submit(withPoolMarker(() -> {
                 try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + table);
                      ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? rs.getLong(1) : 0L;
                 }
-            }));
+            })));
         }
         long[] out = new long[COUNT_TABLES.length];
+        // One shared budget instead of 30 s per table: eight hanging queries used to keep the
+        // caller - /co status runs on the command thread - waiting for up to four minutes.
+        long deadline = System.nanoTime() + COUNTS_BUDGET_NANOS;
         for (int i = 0; i < futures.size(); i++) {
             try {
-                Long v = futures.get(i).get(30, TimeUnit.SECONDS);
-                out[i] = v == null ? 0L : v;
+                long left = deadline - System.nanoTime();
+                if (left <= 0) {
+                    out[i] = -1L;
+                    futures.get(i).cancel(true);
+                    continue;
+                }
+                long waitMs = Math.min(TimeUnit.NANOSECONDS.toMillis(left),
+                        COUNT_QUERY_TIMEOUT_SECONDS * 1000L);
+                Long v = futures.get(i).get(waitMs, TimeUnit.MILLISECONDS);
+                out[i] = v == null ? -1L : v;
             } catch (Exception e) {
-                out[i] = 0L;
+                out[i] = -1L; // unknown, not zero: /co status prints "n/a" for this table
+                futures.get(i).cancel(true);
             }
         }
         return out;
@@ -1165,6 +1256,7 @@ public final class DatabaseManager {
      * Same result as {@link #counts()} but the eight queries run one after another on the
      * calling thread's own read connection. Safe from a read-pool thread: the parallel
      * version submits to the very pool it would be running on and can exhaust it.
+     * A failed table reports {@code -1} so the caller can tell "0 rows" from "query failed".
      */
     public long[] countsSequential() {
         long[] out = new long[COUNT_TABLES.length];
@@ -1173,7 +1265,8 @@ public final class DatabaseManager {
                  ResultSet rs = ps.executeQuery()) {
                 out[i] = rs.next() ? rs.getLong(1) : 0L;
             } catch (Exception e) {
-                out[i] = 0L;
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Count of {} failed: {}", COUNT_TABLES[i], e.toString());
+                out[i] = -1L;
             }
         }
         return out;
@@ -1204,9 +1297,14 @@ public final class DatabaseManager {
     // Purge / compaction
     // ------------------------------------------------------------------
 
-    public long purge(long before) {
-        Long result = execute(() -> doPurge(before));
-        return result == null ? 0L : result;
+    /**
+     * Deletes every log row older than {@code before}.
+     *
+     * @return the number of deleted rows, or {@code null} when the purge failed - the caller
+     *         must report the failure instead of announcing "0 rows deleted".
+     */
+    public Long purge(long before) {
+        return execute(() -> doPurge(before));
     }
 
     /** Fire-and-forget purge used by the data-retention startup limit; logs the row count. */
@@ -1235,12 +1333,25 @@ public final class DatabaseManager {
         try (Statement st = conn.createStatement()) {
             gcDictionaries(st);
         }
+        // ... and drop the id caches too: they still map strings to ids that were just deleted,
+        // so the next log row would reuse a dictionary id that no longer exists.
+        invalidateDictionaries();
         return total;
+    }
+
+    /** Drops every dictionary id cache (after a purge, or after a batch was rolled back). */
+    private void invalidateDictionaries() {
+        nameIds.clear();
+        worldIds.clear();
+        actionIds.clear();
+        stateCache.clear();
     }
 
     /** Lightweight: returns freed pages to the file system (requires auto_vacuum=INCREMENTAL). */
     private void incrementalVacuum() {
-        // VACUUM-style maintenance refuses to run while prepared statements are still open,\n        // so the writer's statement cache is dropped first (it fills up again on demand).\n        closeStatements();
+        // VACUUM-style maintenance refuses to run while prepared statements are still open,
+        // so the writer's statement cache is dropped first (it fills up again on demand).
+        closeStatements();
         try (Statement st = conn.createStatement()) {
             st.execute("PRAGMA incremental_vacuum");
         } catch (SQLException e) {
@@ -1306,6 +1417,13 @@ public final class DatabaseManager {
             int cy = c.center.getY();
             int cz = c.center.getZ();
             long r = c.radius;
+            // A radius without a world is not a place: the same x/y/z exists in every dimension,
+            // so "/co lookup r:10" used to list - and "/co rollback r:10" used to revert - blocks
+            // of the nether and the end that happened to share those coordinates.
+            if (c.world != null && !c.world.isEmpty()) {
+                sql.append(" AND wid_id = (SELECT id FROM co_world WHERE wid = ?)");
+                params.add(c.world);
+            }
             // bounding box first so SQLite can use the (wid,x,y,z) index, then the exact distance check
             sql.append(" AND x BETWEEN ? AND ? AND y BETWEEN ? AND ? AND z BETWEEN ? AND ?"
                     + " AND (x-?)*(x-?)+(y-?)*(y-?)+(z-?)*(z-?) <= ?");
@@ -1342,7 +1460,7 @@ public final class DatabaseManager {
             sql.append(" AND (a.action IS NULL OR a.action NOT LIKE ?)")
                     .append(" AND (so.state IS NULL OR so.state NOT LIKE ?)")
                     .append(" AND (sn.state IS NULL OR sn.state NOT LIKE ?)");
-            params.add(c.exclude);
+            params.add(like); // was the raw value: "e:fire" never matched the action "#fire"
             params.add(like);
             params.add(like);
         }
@@ -1375,8 +1493,39 @@ public final class DatabaseManager {
 
     /** Synchronous read on the parallel read pool (one connection per reader thread). */
     private <T> T executeRead(Callable<T> task) {
+        if (Boolean.TRUE.equals(poolReader.get())) {
+            // A read-pool worker asking the pool for another read waits for a thread that may
+            // never come free (the pool is small), which stalls every other query too. Run the
+            // nested read on the thread that is already there.
+            return callDirect(task);
+        }
         try {
-            T result = readPool.submit(task).get(30, TimeUnit.SECONDS);
+            T result = readPool.submit(withPoolMarker(task)).get(30, TimeUnit.SECONDS);
+            lastReadFailed.set(Boolean.FALSE);
+            return result;
+        } catch (Exception e) {
+            lastReadFailed.set(Boolean.TRUE);
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Database read failed", e);
+            return null;
+        }
+    }
+
+    /** Marks the executing thread as a read-pool worker for the duration of the task. */
+    private <T> Callable<T> withPoolMarker(Callable<T> task) {
+        return () -> {
+            poolReader.set(Boolean.TRUE);
+            try {
+                return task.call();
+            } finally {
+                poolReader.remove();
+            }
+        };
+    }
+
+    /** Runs a read task on the calling thread (callers that are already read-pool workers). */
+    private <T> T callDirect(Callable<T> task) {
+        try {
+            T result = task.call();
             lastReadFailed.set(Boolean.FALSE);
             return result;
         } catch (Exception e) {
@@ -1464,16 +1613,26 @@ public final class DatabaseManager {
      * throwing {@link RejectedExecutionException} on the server thread.
      */
     private void submitWrite(Runnable task) {
-        if (!open) return;
+        if (!open) {
+            // Rows that arrive after close() (listener callbacks during shutdown) are counted:
+            // /co status used to report "0 dropped" while they were silently disappearing.
+            countDropped();
+            return;
+        }
         if (!writeQueue.offer(task)) {
-            long dropped = droppedWrites.incrementAndGet();
-            if (dropped == 1 || dropped % 1000 == 0) {
-                CoreProtectFabric.LOGGER.warn("[CoreProtect] Write queue is full ({} rows dropped so far) - "
-                        + "the disk cannot keep up. Consider database.syncMode=normal.", dropped);
-            }
+            countDropped();
             return;
         }
         scheduleFlush(batchIntervalMs());
+    }
+
+    /** Counts one dropped log row and warns about it (rate limited to once per 1000 rows). */
+    private void countDropped() {
+        long dropped = droppedWrites.incrementAndGet();
+        if (dropped == 1 || dropped % 1000 == 0) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] {} log row(s) dropped so far - the database could not "
+                    + "take them. Consider database.syncMode=normal.", dropped);
+        }
     }
 
     private int batchIntervalMs() {
@@ -1510,11 +1669,16 @@ public final class DatabaseManager {
         if (conn == null) return;
         int rows = 0;
         boolean transaction = false;
+        List<Runnable> pending = null;
         try {
             int max = batchMaxRows();
             while (rows < max) {
                 Runnable task = writeQueue.poll();
                 if (task == null) break;
+                if (pending == null) {
+                    pending = new ArrayList<>();
+                }
+                pending.add(task);
                 if (!transaction) {
                     conn.setAutoCommit(false);
                     transaction = true;
@@ -1525,13 +1689,29 @@ public final class DatabaseManager {
             if (transaction) {
                 conn.commit();
                 committedBatches.incrementAndGet();
+                flushRetryMs = 0;
             }
         } catch (Exception e) {
-            CoreProtectFabric.LOGGER.error("[CoreProtect] Batch commit failed after {} rows", rows, e);
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Batch of {} row(s) failed; they are queued again", rows, e);
             try {
                 conn.rollback();
             } catch (SQLException ignored) {
             }
+            // The rows were already taken out of the queue, so a rolled-back batch used to be
+            // lost without a single log line. Put them back (in their original order, behind
+            // whatever arrived meanwhile) so the next flush writes them.
+            if (pending != null) {
+                List<Runnable> retry = new ArrayList<>(pending);
+                writeQueue.drainTo(retry);
+                for (Runnable task : retry) {
+                    if (!writeQueue.offer(task)) {
+                        countDropped();
+                    }
+                }
+            }
+            // dictionary ids created inside the rolled-back transaction do not exist any more
+            invalidateDictionaries();
+            flushRetryMs = 1000; // do not hammer a disk that just refused a whole batch
         } finally {
             if (transaction) {
                 try {
@@ -1540,15 +1720,38 @@ public final class DatabaseManager {
                 }
             }
             if (!writeQueue.isEmpty() && open) {
-                scheduleFlush(0); // more rows are waiting, keep draining
+                scheduleFlush(flushRetryMs); // 0 = keep draining, >0 = back off after a failed batch
             }
         }
     }
 
     /** Writes everything still queued. Shutdown path, runs on the writer thread. */
     private void drainWrites() {
-        while (!writeQueue.isEmpty() && conn != null) {
+        // A batch that keeps failing is put back into the queue (see flushWrites), so this loop used
+        // to spin forever and the close task could only end through its timeout. Stop after a
+        // deadline or a few unsuccessful rounds and report what could not be written.
+        long deadline = System.nanoTime() + DRAIN_TIMEOUT_NANOS;
+        int failures = 0;
+        while (!writeQueue.isEmpty() && conn != null && System.nanoTime() < deadline) {
+            int before = writeQueue.size();
             flushWrites();
+            if (writeQueue.isEmpty()) break;
+            if (writeQueue.size() >= before) {
+                if (++failures >= DRAIN_MAX_FAILURES) break;
+                try {
+                    Thread.sleep(250L); // give a disk that just refused a batch a moment
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            } else {
+                failures = 0;
+            }
+        }
+        if (!writeQueue.isEmpty()) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] {} row(s) could not be written before the database closed and were dropped.",
+                    writeQueue.size());
+            writeQueue.clear();
         }
     }
 
@@ -1586,8 +1789,36 @@ public final class DatabaseManager {
      * A failed query yields {@code null} for the callback.
      */
     public <T> void submitRead(Callable<T> task, Consumer<T> callback) {
+        CompletableFuture<T> future = submitReadFuture(task);
+        if (future == null) return;
+        future.thenAccept(value -> {
+            MinecraftServer server = CoreProtectFabric.instance() == null ? null : CoreProtectFabric.instance().server();
+            if (server == null) {
+                // no server left to deliver to (shutdown): say so instead of staying silent
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Query result discarded - no server to deliver it to.");
+                return;
+            }
+            server.execute(() -> {
+                try {
+                    callback.accept(value);
+                } catch (Throwable t) {
+                    // a broken callback used to kill the server thread
+                    CoreProtectFabric.LOGGER.error("[CoreProtect] Query callback failed", t);
+                }
+            });
+        });
+    }
+
+    /**
+     * Runs a query on the read pool and returns its future, so a caller that has to answer
+     * before the server tick ends (console/RCON output is flushed when the command returns)
+     * can bound how long it waits without running the task twice. Returns {@code null} when
+     * the pool is shutting down; a failed query completes with {@code null}.
+     */
+    public <T> CompletableFuture<T> submitReadFuture(Callable<T> task) {
+        CompletableFuture<T> future = new CompletableFuture<>();
         try {
-            readPool.submit(() -> {
+            readPool.submit(withPoolMarker(() -> {
                 T value;
                 try {
                     value = task.call();
@@ -1595,14 +1826,15 @@ public final class DatabaseManager {
                     CoreProtectFabric.LOGGER.warn("[CoreProtect] Query failed: {}", t.toString());
                     value = null;
                 }
-                final T result = value;
-                MinecraftServer server = CoreProtectFabric.instance() == null ? null : CoreProtectFabric.instance().server();
-                if (server == null) return;
-                server.execute(() -> callback.accept(result));
-            });
+                future.complete(value);
+                return value;
+            }));
         } catch (RejectedExecutionException e) {
             // the read pool is shutting down; nothing left to answer
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Query rejected - the database is shutting down.");
+            return null;
         }
+        return future;
     }
 
     private static void bind(PreparedStatement ps, List<Object> params) throws SQLException {

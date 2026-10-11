@@ -2,7 +2,10 @@ package net.coreprotect.fabric;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import net.coreprotect.fabric.command.CoCommand;
 import net.coreprotect.fabric.config.CoreProtectConfig;
@@ -41,19 +44,23 @@ import org.slf4j.LoggerFactory;
 
 public final class CoreProtectFabric implements ModInitializer {
     public static final String MOD_ID = "coreprotect";
-    public static final String MOD_VERSION = "1.9.2";
+    public static final String MOD_VERSION = "1.9.3";
     public static final Logger LOGGER = LoggerFactory.getLogger("CoreProtect");
 
     /**
-     * Natural causes that reach us through {@code World#setBlockState} (explosions,
-     * endermen, pistons). Causes that reach us through {@code breakBlock}/{@code removeBlock}
-     * (fire, water/lava, leaf decay) are in {@link #BREAK_CAUSES}.
+     * Natural causes that reach us through {@code World#setBlockState}: explosions,
+     * endermen, pistons, fluid flow and fire. Fire belongs here as well as in
+     * {@link #BREAK_CAUSES} because {@code FireBlock} burns fuel by REPLACING the block
+     * through {@code setBlockState} (only the removal of the fire blocks themselves goes
+     * through {@code removeBlock}). Causes that only ever remove a block (leaf decay) stay
+     * in {@link #BREAK_CAUSES} only — listing one in both sets would log every removal twice.
      */
     private static final Set<String> SET_STATE_CAUSES = Set.of(
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal", "#enderman", "#piston",
-            "#water", "#lava", "#fluid");
+            "#water", "#lava", "#fluid", "#fire");
     private static final Set<String> BREAK_CAUSES = Set.of(
-            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston");    private static final Set<String> EXPLOSION_CAUSES = Set.of(
+            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston");
+    private static final Set<String> EXPLOSION_CAUSES = Set.of(
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal");
     private static final Set<String> FLUID_CAUSES = Set.of("#water", "#lava", "#fluid");
 
@@ -195,15 +202,72 @@ public final class CoreProtectFabric implements ModInitializer {
     }
 
     // ------------------------------------------------------------------
+    // Packet-level audit hooks (commands, sign edits)
+    // ------------------------------------------------------------------
+
+    /** Records one player may write through the packet hooks per {@link #PACKET_LOG_WINDOW_MS}. */
+    private static final int PACKET_LOG_MAX = 60;
+    private static final long PACKET_LOG_WINDOW_MS = 60_000L;
+    /** Tracked players before expired windows are pruned again. */
+    private static final int PACKET_LOG_MAX_TRACKED = 256;
+
+    /** Per-player {windowStart, records} counters; the hooks are fed by unvalidated packets. */
+    private static final Map<UUID, long[]> PACKET_LOG_WINDOWS = new ConcurrentHashMap<>();
+
+    /**
+     * Rate limit for the command and sign-edit hooks (B8). Both are driven by client
+     * packets, so a modified client could otherwise fill the audit tables with records
+     * that no vanilla action backs. Returns {@code false} for records that must be dropped.
+     */
+    public static boolean allowPacketLog(UUID playerId) {
+        long now = System.currentTimeMillis();
+        if (PACKET_LOG_WINDOWS.size() > PACKET_LOG_MAX_TRACKED) {
+            PACKET_LOG_WINDOWS.values().removeIf(window -> now - window[0] >= PACKET_LOG_WINDOW_MS);
+        }
+        long[] window = PACKET_LOG_WINDOWS.computeIfAbsent(playerId, key -> new long[]{now, 0L});
+        if (now - window[0] >= PACKET_LOG_WINDOW_MS) {
+            window[0] = now;
+            window[1] = 0L;
+        }
+        window[1]++;
+        if (window[1] <= PACKET_LOG_MAX) return true;
+        if (window[1] == PACKET_LOG_MAX + 1L) {
+            LOGGER.warn("[CoreProtect] Throttling command/sign records for a player: more than {} entries per minute.",
+                    PACKET_LOG_MAX);
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
     // Mixin entry points for natural (non-player) block changes
     // ------------------------------------------------------------------
 
     public static void hookSetBlockState(World world, BlockPos pos, BlockState newState) {
+        try {
+            hookSetBlockStateInternal(world, pos, newState);
+        } catch (Throwable t) {
+            // E16: this hook runs inside vanilla world code. A logging failure must never
+            // abort the vanilla write, and must not skip the mixin TAIL that clears the
+            // cause window either.
+            LOGGER.warn("[CoreProtect] Failed to log a natural setBlockState at {}: {}", pos, t.toString());
+        }
+    }
+
+    private static void hookSetBlockStateInternal(World world, BlockPos pos, BlockState newState) {
         CoreProtectFabric mod = instance;
         if (mod == null || world.isClient() || mod.server == null) return;
         if (!mod.config.logging.natural) return;
         NaturalBreakCause.Cause cause = NaturalBreakCause.get();
         if (cause == null || !SET_STATE_CAUSES.contains(cause.type)) return;
+        // E11: the hook runs at HEAD because it needs the state BEFORE the write (at RETURN
+        // World#getBlockState already returns the new state). The writes vanilla rejects in
+        // that case have to be filtered here, otherwise they produce records for changes that
+        // never happened: outside the build/load limit / in a debug world / a null state.
+        // (The remaining rejection - WorldChunk#setBlockState returning null - only happens
+        // for air-into-empty-section writes, which the "states are equal" check below drops.)
+        // 1.21 has no World#isInLoadLimit (its setBlockState rejects on the height limit and
+        // on the +/-30M horizontal limit); World#isInBuildLimit is exactly that pair.
+        if (newState == null || !world.isInBuildLimit(pos) || world.isDebugWorld()) return;
         BlockState oldState = world.getBlockState(pos);
         if (oldState.equals(newState)) return;
         // state-only changes (water level, piston extension, dropper "triggered", ...) are not
@@ -212,12 +276,26 @@ public final class CoreProtectFabric implements ModInitializer {
         // Delegated overloads of setBlockState report the same change twice; a genuine
         // second change at the same position (different states) is still logged.
         if (cause.alreadyLoggedSet(pos, oldState, newState)) return;
+        // E6: World#removeBlock first fires the break hook and then delegates to setBlockState,
+        // so the same removal reached both ledgers and was recorded twice. A delegated write
+        // that is not air (the fluid state of a waterlogged block, ...) is a real second
+        // change and stays logged.
+        if (newState.isAir() && cause.alreadyLoggedBreak(pos, oldState)) return;
         // Piston mechanism noise: the head extending into air and the moving ghost /
         // head states themselves are not meaningful records ("piston changed air").
         if ("#piston".equals(cause.type)
                 && (oldState.isAir() || isPistonPart(oldState) || isPistonPart(newState))) return;
         // Explosions also place fire inside this window; only their removals are logged.
         if (EXPLOSION_CAUSES.contains(cause.type) && !newState.isAir()) return;
+        // Fire: a fire block is never a record of its own. Spreading into air (the common case
+        // of FireBlock#scheduledTick) and a fire that burns out / is replaced are noise; only a
+        // burn that consumes a real block (wood -> fire) is kept, and the "-> air" variant of a
+        // burn goes through removeBlock, where the break hook records it and the E6 check above
+        // suppresses the duplicate.
+        if ("#fire".equals(cause.type)) {
+            if (oldState.getBlock() instanceof AbstractFireBlock) return;
+            if (oldState.isAir() && newState.getBlock() instanceof AbstractFireBlock) return;
+        }
         // Water/lava flow constantly replaces air and fluid states; only actual block destruction is logged.
         if (FLUID_CAUSES.contains(cause.type)
                 && (oldState.isAir() || oldState.getBlock() instanceof FluidBlock)) return;
@@ -228,11 +306,23 @@ public final class CoreProtectFabric implements ModInitializer {
     }
 
     public static void hookBreakBlock(World world, BlockPos pos) {
+        try {
+            hookBreakBlockInternal(world, pos);
+        } catch (Throwable t) {
+            // E16: see hookSetBlockState - never throw into vanilla world code.
+            LOGGER.warn("[CoreProtect] Failed to log a natural block removal at {}: {}", pos, t.toString());
+        }
+    }
+
+    private static void hookBreakBlockInternal(World world, BlockPos pos) {
         CoreProtectFabric mod = instance;
         if (mod == null || world.isClient() || mod.server == null) return;
         if (!mod.config.logging.natural) return;
         NaturalBreakCause.Cause cause = NaturalBreakCause.get();
         if (cause == null || !BREAK_CAUSES.contains(cause.type)) return;
+        // E11: same reasoning as hookSetBlockState - drop the removals vanilla would reject.
+        // 1.21: isInBuildLimit stands in for the 1.21.11 World#isInLoadLimit (see above).
+        if (!world.isInBuildLimit(pos) || world.isDebugWorld()) return;
         BlockState oldState = world.getBlockState(pos);
         if (oldState.isAir()) return;
         if (cause.alreadyLoggedBreak(pos, oldState)) return;
@@ -257,6 +347,16 @@ public final class CoreProtectFabric implements ModInitializer {
      * completes: removed at the source, placed at the destination.
      */
     public static void logPistonMove(World world, BlockPos pos, BlockState state, PistonBlockEntity blockEntity) {
+        try {
+            logPistonMoveInternal(world, pos, state, blockEntity);
+        } catch (Throwable t) {
+            // E16: the mixin TAIL that calls this runs inside the vanilla piston tick, so a
+            // logging failure here would break the piston itself.
+            LOGGER.warn("[CoreProtect] Failed to log a piston movement at {}: {}", pos, t.toString());
+        }
+    }
+
+    private static void logPistonMoveInternal(World world, BlockPos pos, BlockState state, PistonBlockEntity blockEntity) {
         CoreProtectFabric mod = instance;
         if (mod == null || world.isClient() || mod.server == null) return;
         if (!mod.config.logging.natural) return;

@@ -1,9 +1,14 @@
 <#
     probe6.ps1 -- replay publish.ps1's dumped payloads through the probe's request code.
 
-    ASCII only. Sends payload-N.json (written by publish.ps1 -DumpPayload) with the real
-    jar, first without an explicit Content-Type on the file part (the probe5 shape, which
-    returned HTTP 200) and then with application/octet-stream (the publish.ps1 shape).
+    ASCII only. Sends payload-N.json (written by publish.ps1 -DumpPayload) together with the
+    real jar, using the default multipart shape: no explicit Content-Type on the file part,
+    which is the shape api.modrinth.com answers with HTTP 200.
+
+    One payload means exactly one upload. An earlier version of this script also re-sent
+    payload-1 with an explicit application/octet-stream Content-Type as a diagnostic, which
+    created a second Modrinth version on every release (the extra 1.9.2 version had to be
+    deleted by hand); that second upload is gone and the code path no longer exists.
 #>
 [CmdletBinding()]
 param(
@@ -29,15 +34,19 @@ $versions = ([System.IO.File]::ReadAllText((Join-Path $here 'versions.json'), [S
 
 function Send-Dump {
     param(
-        [int]$Index,
-        [switch]$ExplicitType
+        [int]$Index
     )
     $n = $Index - 1
     $payloadPath = Join-Path $here ("payload-{0}.json" -f $Index)
     $json = [System.IO.File]::ReadAllText($payloadPath, [System.Text.Encoding]::UTF8)
     $v = $versions[$n]
     $jar = Join-Path $Root ($v.file -replace '/', '\')
-    $label = "payload-$Index $(if ($ExplicitType) { 'octet-stream' } else { 'default'      })"
+    $label = "payload-$Index"
+
+    if (-not (Test-Path -LiteralPath $jar)) {
+        Write-Host ("{0,-34} SKIP     : no jar at {1}" -f $label, $jar)
+        return
+    }
 
     $client = New-Object System.Net.Http.HttpClient
     $client.Timeout = [TimeSpan]::FromMinutes(20)
@@ -50,9 +59,6 @@ function Send-Dump {
         $form.Add((New-Object System.Net.Http.StringContent($json, $utf8, 'application/json')), 'data')
         $stream = [System.IO.File]::OpenRead($jar)
         $content = New-Object System.Net.Http.StreamContent($stream)
-        if ($ExplicitType) {
-            $content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
-        }
         $form.Add($content, 'file', [System.IO.Path]::GetFileName($jar))
         $response = $client.PostAsync("$api/version", $form).Result
         $text = $response.Content.ReadAsStringAsync().Result
@@ -72,13 +78,10 @@ function Send-Dump {
     }
 }
 
-# payload-1 first tests both request shapes (the explicit one only as a diagnostic,
-# because whichever succeeds creates version 1.9.0 for 1.21); the other two payloads
-# are then sent only in the default shape.
+# One upload per payload - see the header: never send the same payload twice.
 for ($i = 1; $i -le $Max; $i++) {
     $payloadPath = Join-Path $here ("payload-{0}.json" -f $i)
     if (-not (Test-Path -LiteralPath $payloadPath)) { continue }
-    if ($i -eq 1) { Send-Dump -Index $i -ExplicitType }
     Send-Dump -Index $i
 }
 Write-Host 'PROBE6_DONE'

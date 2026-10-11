@@ -11,6 +11,7 @@ import net.coreprotect.fabric.database.Criteria;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.Messages;
+import net.coreprotect.fabric.util.Permissions;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -33,7 +34,11 @@ public final class Inspector {
     private final Set<UUID> active = ConcurrentHashMap.newKeySet();
 
     public boolean isInspecting(ServerPlayerEntity player) {
-        return active.contains(player.getUuid());
+        if (!active.contains(player.getUuid())) return false;
+        // B7: the permission is re-checked on every use instead of only when /co inspect was
+        // run, so a permission change (/co reload raising lookupLevel, a group edit, ...) takes
+        // effect immediately instead of being ignored until the player relogs.
+        return Permissions.has(player.getCommandSource(), Permissions.NODE_INSPECT);
     }
 
     /** Toggles inspection for the player; returns the new state. */
@@ -64,6 +69,9 @@ public final class Inspector {
     public void showBlockHistory(ServerPlayerEntity player, World world, BlockPos pos) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
+        // B7: defensive re-check, so a lookup cannot be produced for a player whose inspect
+        // permission was revoked between the interaction and this call.
+        if (!Permissions.has(player.getCommandSource(), Permissions.NODE_INSPECT)) return;
         ServerCommandSource source = player.getCommandSource();
         String wid = world.getRegistryKey().getValue().toString();
         int lines = mod.config().lookup.inspectLines;

@@ -1,4 +1,4 @@
-# CoreProtect Fabric — Mod Overview (v1.9.2)
+# CoreProtect Fabric — Mod Overview (v1.9.3)
 
 ## One-Line Summary
 
@@ -55,7 +55,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 
 ### 6. Permission System
 
-- **Level-based (default)**: `permissions.lookupLevel` (default 0 = everyone) / `adminLevel` (default 4 = ops) — zero configuration on Fabric servers without a permission plugin
+- **Level-based (default)**: `permissions.lookupLevel` (default 1 = moderators and above; 0 = everyone) / `adminLevel` (default 4 = ops) — zero configuration on Fabric servers without a permission plugin
 - **Permission groups (optional)**: with `permissionGroups.enabled` set, players are granted fine-grained nodes by name list (12 nodes such as `coreprotect.help`, `coreprotect.inspect`, `coreprotect.lookup`, `coreprotect.online`, `coreprotect.rollback`); memberships from multiple groups merge, names are case-insensitive, and unmatched players fall back to the level-based rules
 
 ### 7. Data Maintenance & Multi-Language
@@ -106,7 +106,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 | Minecraft | **1.21.11** |
 | Server | Fabric Loader ≥ 0.16 + Fabric API |
 | Java | 21 |
-| Install | Drop `coreprotect-fabric-1.21.11-1.9.2.jar` into `mods/`; config and database are generated on first launch |
+| Install | Drop `coreprotect-fabric-1.21.11-1.9.3.jar` into `mods/`; config and database are generated on first launch |
 
 > The mod is also available for the full range 1.21.2 ~ 1.21.11 and 26.1 ~ 26.2 (each build lives in its own project directory) with the same feature set.
 
@@ -117,7 +117,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 - **Dispute forensics**: inspection mode pinpoints the on-site history quickly; `/co online` verifies player join/leave times
 - **Server administration**: session/command/chat logs plus automatic data pruning assist audits and moderation
 
-## Known Limitations (v1.9.2)
+## Known Limitations (v1.9.3)
 
 - Hopper (`#hopper`), dropper (`#dropper`) and dispenser (`#dispenser`) transactions are all logged
 - Item-drop logging covers player drops and pickups; drops spawned by breaking blocks are not recorded separately (they are already part of the block-break record)

@@ -54,7 +54,11 @@ replay_pid*
 apikey.txt
 github-recovery-codes.txt
 *.recovery-codes*
-.build-tools/modrinth/token.txt
+# The publishing tools resolve the token next to themselves ($PSScriptRoot), so a copied
+# or renamed copy of the tooling must stay ignored too - not just this one exact path.
+# Bare names match at any depth.
+token.txt
+*.pat
 启动.cmd
 
 # ------------------------------------------------------------------

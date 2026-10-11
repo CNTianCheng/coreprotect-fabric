@@ -232,7 +232,19 @@ public final class CoCommand {
         // The eight table counts used to run on the tick thread (8 x get(30 s)); the whole
         // report is now printed from the callback, so the ordering stays the same.
         LookupService.query(source, db::countsSequential, counts -> {
-            long[] rows = counts == null ? new long[8] : counts;
+            long[] rows;
+            if (counts == null) {
+                // the whole report failed: show "n/a" instead of a row of convincing zeros
+                rows = new long[8];
+                java.util.Arrays.fill(rows, -1L);
+            } else {
+                rows = counts;
+            }
+            Object[] shown = new Object[rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                // -1 is a failed COUNT(*); printing it as a number hid the failure
+                shown[i] = rows[i] < 0 ? "n/a" : Long.toString(rows[i]);
+            }
             ServerPlayerEntity p = source.getPlayer();
             String on = t.get(p, "coreprotect.word.on");
             String off = t.get(p, "coreprotect.word.off");
@@ -240,8 +252,7 @@ public final class CoCommand {
             Messages.title(source, "coreprotect.status.header");
             Messages.statusLine(source, "coreprotect.status.version", CoreProtectFabric.MOD_VERSION);
             Messages.statusLine(source, "coreprotect.status.database", String.valueOf(db.dbPath()));
-            Messages.statusLine(source, "coreprotect.status.counts",
-                    rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]);
+            Messages.statusLine(source, "coreprotect.status.counts", shown);
             Messages.statusLine(source, "coreprotect.status.language",
                     t.defaultLanguage(), String.join(", ", t.available()));
             Messages.statusLine(source, "coreprotect.status.logging",
@@ -257,6 +268,9 @@ public final class CoCommand {
             } else {
                 Messages.statusLine(source, "coreprotect.status.retention.off");
             }
+            // Rows that were dropped (queue full / database closed) are otherwise invisible
+            long[] writes = db.writeStats();
+            Messages.statusLine(source, "coreprotect.status.writes", writes[0], writes[1], writes[2]);
         });
         return 1;
     }
@@ -364,9 +378,7 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
-        if (c.radius > 0 && c.center == null) {
-            c.center = source.getPlayer() != null ? source.getPlayer().getBlockPos() : BlockPos.ORIGIN;
-        }
+        if (!applyRadius(source, c)) return 0;
         return LookupService.run(source, c);
     }
 
@@ -386,13 +398,12 @@ public final class CoCommand {
                 return 0;
             }
         }
-        if (c.radius > 0 && c.center == null) {
-            c.center = source.getPlayer() != null ? source.getPlayer().getBlockPos() : BlockPos.ORIGIN;
-        }
-        Messages.cmd(source, isRestore ? "coreprotect.restore.start" : "coreprotect.rollback.start");
+        if (!applyRadius(source, c)) return 0;
         // The rollback runs asynchronously: the queries happen on the read pool and the world
         // is edited in short slices on the server thread, so a 5000-block rollback no longer
-        // freezes the server. Completion and error messages are sent by RollbackManager.
+        // freezes the server. Completion and error messages are sent by RollbackManager, which
+        // also prints "rollback started" - only once it knows the command is not refused
+        // because another operation of the same caller is still running.
         CoreProtectFabric.instance().rollbackManager().startRollback(source, c, isRestore);
         return 1;
     }
@@ -400,6 +411,26 @@ public final class CoCommand {
     private static int undo(ServerCommandSource source) {
         CoreProtectFabric.instance().rollbackManager().startUndo(source);
         return 1;
+    }
+
+    /**
+     * Fills in the center of an {@code r:} filter and scopes it to the caller's dimension.
+     *
+     * <p>Without a player the center used to default to {@code (0,0,0)} silently, so a console
+     * {@code /co rollback r:10} hit the world spawn; and because the radius filter carried no
+     * world condition, it reached the spawn of every dimension. Radius commands from console,
+     * RCON and command blocks are refused now, and a player's radius stays in their world.
+     */
+    private static boolean applyRadius(ServerCommandSource source, Criteria c) {
+        if (c == null || c.radius <= 0) return true;
+        ServerPlayerEntity player = source.getPlayer();
+        if (player == null) {
+            Messages.error(source, "coreprotect.error.radius_needs_player");
+            return false;
+        }
+        c.center = player.getBlockPos();
+        c.world = source.getWorld().getRegistryKey().getValue().toString();
+        return true;
     }
 
     private static int purge(ServerCommandSource source, String params) {

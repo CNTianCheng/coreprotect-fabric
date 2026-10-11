@@ -36,43 +36,58 @@ public final class Permissions {
 
     /**
      * True when the command source satisfies the given vanilla permission level
-     * (1.21.9+ permission API); console and command blocks always pass.
+     * (1.21.9+ permission API). Console/RCON hold level 4 and pass; a command block only
+     * holds the level of whoever placed it, so it is checked like any other source.
      */
     public static boolean hasLevel(ServerCommandSource source, int level) {
         if (source == null) return false;
-        if (source.getPlayer() == null) return true;
         return levelCheck(level).allows(source.getPermissions());
     }
 
-    /** Maps a vanilla OP level (0-4) to the corresponding permission check. */
+    /**
+     * Maps a vanilla OP level (0-4) to the corresponding permission check. Anything outside
+     * 0..4 fails closed (owners only) - {@code adminLevel: 5} used to mean "everybody".
+     */
     public static PermissionCheck levelCheck(int level) {
         return switch (level) {
             case 4 -> CommandManager.OWNERS_CHECK;
             case 3 -> CommandManager.ADMINS_CHECK;
             case 2 -> CommandManager.GAMEMASTERS_CHECK;
             case 1 -> CommandManager.MODERATORS_CHECK;
-            default -> CommandManager.ALWAYS_PASS_CHECK;
+            case 0 -> CommandManager.ALWAYS_PASS_CHECK;
+            default -> CommandManager.OWNERS_CHECK;
         };
     }
 
     public static boolean has(ServerCommandSource source, String node) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
-        if (mod == null) return false;
-        ServerPlayerEntity player = source.getPlayer();
-        if (player == null) return true; // console / command blocks / server
+        if (mod == null || source == null) return false;
 
         CoreProtectConfig.Permissions p = mod.config().permissions;
         int required = ADMIN_NODES.contains(node) ? p.adminLevel : p.lookupLevel;
+
+        ServerPlayerEntity player = source.getPlayer();
+        if (player == null) {
+            // Console and RCON hold level 4 and still pass, but a command block is only as
+            // privileged as the player who placed it: a GAMEMASTER could otherwise place one
+            // and run /co purge or /co rollback through it.
+            return levelCheck(required).allows(source.getPermissions());
+        }
         if (levelCheck(required).allows(source.getPermissions())) return true;
 
         CoreProtectConfig.PermissionGroups pg = mod.config().permissionGroups;
         if (pg == null || !pg.enabled || pg.groups == null) return false;
+        String uuid = player.getUuidAsString();
         String name = player.getGameProfile().name();
+        // Player names are not identities on an offline-mode server: anybody can log in with a
+        // name that is listed in the config and inherit that group (default admin = "all").
+        boolean onlineMode = mod.server() != null && mod.server().isOnlineMode();
         for (CoreProtectConfig.PermissionGroups.Group group : pg.groups.values()) {
             if (group == null || group.players == null || group.permissions == null) continue;
             boolean member = false;
-            for (String pName : group.players) {
-                if (name.equalsIgnoreCase(pName)) {
+            for (String entry : group.players) {
+                if (entry == null || entry.isBlank()) continue;
+                if (sameUuid(entry, uuid) || (onlineMode && name != null && name.equalsIgnoreCase(entry))) {
                     member = true;
                     break;
                 }
@@ -85,6 +100,14 @@ public final class Permissions {
             }
         }
         return false;
+    }
+
+    /** UUID comparison that tolerates the dashed and undashed spellings of the same id. */
+    private static boolean sameUuid(String configured, String uuid) {
+        if (configured == null || uuid == null) return false;
+        String a = configured.trim().replace("-", "");
+        String b = uuid.replace("-", "");
+        return a.length() == 32 && a.equalsIgnoreCase(b);
     }
 
     /** Number of configured permission groups (for /co status). */

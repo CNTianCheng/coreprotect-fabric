@@ -1,4 +1,4 @@
-# CoreProtect Fabric 模组概述（v1.9.2）
+# CoreProtect Fabric 模组概述（v1.9.3）
 
 ## 一句话介绍
 
@@ -55,7 +55,7 @@
 
 ### 6. 权限系统
 
-- **等级制（默认）**：`permissions.lookupLevel`（默认 0 = 所有人）/ `adminLevel`（默认 4 = OP），无权限插件的 Fabric 环境零配置可用
+- **等级制（默认）**：`permissions.lookupLevel`（默认 1 = 仅管理员，0 = 所有人）/ `adminLevel`（默认 4 = OP），无权限插件的 Fabric 环境零配置可用
 - **权限组（可选）**：开启 `permissionGroups.enabled` 后按玩家名单授予细粒度节点（`coreprotect.help`、`coreprotect.inspect`、`coreprotect.lookup`、`coreprotect.online`、`coreprotect.rollback` 等 12 个节点），多组取并集、名字不分大小写，未匹配的玩家回退到等级制判断
 
 ### 7. 数据维护与多语言
@@ -106,7 +106,7 @@
 | Minecraft | **26.1.2** |
 | 服务端 | Fabric Loader ≥ 0.19 + Fabric API |
 | Java | 25 |
-| 安装 | 将 `coreprotect-fabric-26.1.2-1.9.2.jar` 放入 `mods/` 即可，首次启动自动生成配置与数据库 |
+| 安装 | 将 `coreprotect-fabric-26.1.2-1.9.3.jar` 放入 `mods/` 即可，首次启动自动生成配置与数据库 |
 
 > 本模组另提供 1.21.2 ~ 1.21.11 与 26.1 ~ 26.2 全系列的对应构建（位于各自的工程目录），功能保持一致。
 
@@ -117,7 +117,7 @@
 - **纠纷取证**：配合检查模式快速定位现场历史；`/co online` 核对玩家上下线时间
 - **服务器运维**：会话/命令/聊天记录 + 自动数据清理辅助管理审计
 
-## 已知限制（v1.9.2）
+## 已知限制（v1.9.3）
 
 - 漏斗（`#hopper`）、投掷器（`#dropper`）、发射器（`#dispenser`）交易均已记录
 - 掉落物记录覆盖玩家丢弃/捡起；方块被破坏产生的掉落物不做独立记录（已含在方块破坏记录中）

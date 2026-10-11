@@ -33,6 +33,13 @@ public final class Translator {
 
     private final Map<String, Map<String, String>> languages = new HashMap<>();
     private final Map<UUID, String> overrides = new ConcurrentHashMap<>();
+    /**
+     * Language cached per player NAME - the key the database uses - so that the join handler
+     * can apply an override without reading the database (D6). Refreshed in the background.
+     */
+    private final Map<String, String> storedLanguages = new ConcurrentHashMap<>();
+    /** Keys already reported as missing, so a broken translation file is logged once (E19). */
+    private final Set<String> warnedKeys = ConcurrentHashMap.newKeySet();
     private final List<String> available = new ArrayList<>();
     private String defaultLanguage = "en_us";
 
@@ -102,6 +109,21 @@ public final class Translator {
         return defaultLanguage;
     }
 
+    /** The language last read for this player name, or {@code null} when there is none (D6). */
+    public String cachedUserLanguage(String name) {
+        return name == null ? null : storedLanguages.get(name);
+    }
+
+    /** Caches the language stored for a player name; {@code null} means "no override" (D6). */
+    public void cacheUserLanguage(String name, String code) {
+        if (name == null) return;
+        if (code == null) {
+            storedLanguages.remove(name);
+        } else {
+            storedLanguages.put(name, code);
+        }
+    }
+
     public String get(ServerPlayer player, String key, Object... args) {
         return format(lookup(localeOf(player), key), args);
     }
@@ -116,6 +138,10 @@ public final class Translator {
             if (map != null && map.containsKey(key)) {
                 return map.get(key);
             }
+        }
+        // E19: a missing key used to be printed as the key itself with no hint about the cause.
+        if (warnedKeys.add(key)) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Missing translation key: {}", key);
         }
         return key;
     }
@@ -137,12 +163,37 @@ public final class Translator {
     private static String format(String pattern, Object... args) {
         if (args == null || args.length == 0) return pattern;
         try {
-            // MessageFormat treats ' as a quoting character: an apostrophe in a translation
-            // (or a name/message inserted into one) would throw and lose the placeholders,
-            // so every quote is escaped first
-            return MessageFormat.format(pattern.replace("'", "''"), args);
+            return MessageFormat.format(escapeQuotes(pattern), args);
         } catch (IllegalArgumentException e) {
             return pattern;
         }
+    }
+
+    /**
+     * MessageFormat reads a single quote as the start of a quoted section, so an apostrophe in
+     * a translation ("player's {0}") would swallow everything up to the next quote - placeholder
+     * included - and the message would be printed unchanged. Escaping every quote is what makes
+     * such translations work; the refinement here is that a pair the translator already wrote as
+     * {@code ''} stays ONE literal quote instead of becoming two.
+     *
+     * <p>Escaping "only unbalanced quotes" is not sufficient: two apostrophes that are not meant
+     * as a pair (e.g. "player's name's {0}") would still open and close a section, and both
+     * characters would disappear from the output.</p>
+     */
+    private static String escapeQuotes(String pattern) {
+        if (pattern.indexOf('\'') < 0) return pattern;
+        StringBuilder escaped = new StringBuilder(pattern.length() + 8);
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            if (c != '\'') {
+                escaped.append(c);
+                continue;
+            }
+            escaped.append("''");
+            if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+                i++; // an already doubled quote is one literal quote, not two
+            }
+        }
+        return escaped.toString();
     }
 }

@@ -2,6 +2,7 @@ package net.coreprotect.fabric.mixin;
 
 import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.DatabaseManager;
+import net.coreprotect.fabric.util.ItemStackCodec;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
@@ -40,6 +41,7 @@ public abstract class PlayerEntityDropMixin {
                 0, TimeUtil.now(), sp.getGameProfile().name(),
                 world.dimension().identifier().toString(),
                 pos.getX(), pos.getY(), pos.getZ(), "-",
-                BuiltInRegistries.ITEM.getKey(droppedStack.getItem()).toString(), droppedStack.getCount()));
+                BuiltInRegistries.ITEM.getKey(droppedStack.getItem()).toString(), droppedStack.getCount(),
+                ItemStackCodec.encodeIdentity(droppedStack, world.registryAccess())));
     }
 }

@@ -35,7 +35,7 @@
 ## 📥 安装
 
 1. 需要 **Java 21** 和 **Fabric Loader 0.16+**（服务端），并安装 **Fabric API**。
-2. 将 `coreprotect-fabric-1.21-1.9.2.jar` 放入服务端 `mods/` 文件夹。
+2. 将 `coreprotect-fabric-1.21-1.9.3.jar` 放入服务端 `mods/` 文件夹。
 3. 启动服务器。数据库默认创建在游戏目录下的 `coreprotect.db`，配置在 `config/coreprotect-fabric.json`。
 
 ## 🛠 自行构建
@@ -43,7 +43,7 @@
 ```bash
 # 需要 JDK 21
 ./gradlew build
-# 产物位于 build/libs/coreprotect-fabric-1.21-1.9.2.jar
+# 产物位于 build/libs/coreprotect-fabric-1.21-1.9.3.jar
 ```
 
 ## 🎮 命令
@@ -69,7 +69,7 @@
 
 - **时间格式**：`2w5d10h30m15s`（周/天/小时/分钟/秒），纯数字按秒计。
 - **操作类型 `a:`**：`block`（全部方块）、`+block`（仅放置）、`-block`（仅破坏）、`#container`（容器）、`item`/`#item`（掉落物）、`#sign`（告示牌编辑）、`#kill`（击杀）、`#chat`、`#command`、`#session`、`+session`、`-session`，以及自然事件 `#fire` `#water` `#lava` `#explosion` `#creeper` `#tnt` `#wither` `#end_crystal` `#enderman` `#piston` `#decay`。
-- 权限等级：`config/coreprotect-fabric.json` 中 `permissions.lookupLevel`（默认 0 = 所有人）与 `permissions.adminLevel`（默认 4 = OP）。开启 `permissionGroups.enabled` 后，按玩家名单授予细粒度节点，OP 等级仅作为未匹配到组时的回退。
+- 权限等级：`config/coreprotect-fabric.json` 中 `permissions.lookupLevel`（默认 1 = 仅管理员，0 = 所有人）与 `permissions.adminLevel`（默认 4 = OP）。开启 `permissionGroups.enabled` 后，按玩家名单授予细粒度节点，OP 等级仅作为未匹配到组时的回退。
 
 ## 🔐 权限组（permissionGroups）
 
@@ -99,7 +99,7 @@
 
 可用节点：`coreprotect.help`、`coreprotect.status`、`coreprotect.inspect`、`coreprotect.lookup`、`coreprotect.online`、`coreprotect.language`（lookup 级），`coreprotect.rollback`、`coreprotect.restore`、`coreprotect.undo`、`coreprotect.purge`、`coreprotect.reload`、`coreprotect.debug`（admin 级）。
 
-规则：玩家名与节点名不区分大小写；一个玩家属于多个组时取并集；未匹配到任何组的玩家回退到 `permissions.lookupLevel`/`adminLevel` 判断；控制台与命令方块始终拥有全部权限。`/co status` 会显示权限组的开关状态与组数量。
+规则：玩家名与节点名不区分大小写；一个玩家属于多个组时取并集；未匹配到任何组的玩家回退到 `permissions.lookupLevel`/`adminLevel` 判断；命令方块与控制台按自身权限判定（命令方块默认无权，控制台按 OP 等级），不再默认全权；权限组中的玩家名只在正版（online-mode）服务器生效，离线模式下按 UUID 匹配。`/co status` 会显示权限组的开关状态与组数量。
 
 ## ⚙️ 配置（config/coreprotect-fabric.json）
 
@@ -118,7 +118,7 @@
     "inspectLines": 8             // 检查模式显示行数
   },
   "rollback": { "maxBlocks": 5000 }, // 单次回滚的安全上限
-  "permissions": { "lookupLevel": 0, "adminLevel": 4 },
+  "permissions": { "lookupLevel": 1, "adminLevel": 4 },
   "permissionGroups": {
     "enabled": false,
     "groups": {
@@ -128,6 +128,8 @@
   "database": {                  // 数据库调优与安全
     "cacheSizeMB": 128,          // 每连接页面缓存（越大查询越快，占用内存越多）
     "syncMode": "full",          // full=每次提交刷盘（断电也不丢已提交数据）；normal=更快
+    "batchIntervalMs": 250,      // 写入批处理间隔（毫秒，0=立即提交）
+    "batchMaxRows": 1000,        // 单批最多行数（达到即提交）
     "checkpointMinutes": 10,     // WAL 检查点间隔（越小崩溃恢复越快）
     "backupMinutes": 360,        // 在线热备份间隔（写 coreprotect.db.backup）；0=关闭
     "autoRestoreBackup": true    // 检测到损坏时自动从备份恢复

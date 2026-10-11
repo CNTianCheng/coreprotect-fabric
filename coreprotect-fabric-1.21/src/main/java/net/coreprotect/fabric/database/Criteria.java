@@ -22,4 +22,10 @@ public final class Criteria {
     public int page = 1;
     /** Center used for the radius check (usually the command executor's position). */
     public BlockPos center;
+    /**
+     * Dimension id (e.g. {@code minecraft:overworld}) the radius filter is scoped to. Without
+     * it a radius matches the same coordinates in every dimension. {@code null} = no world scope
+     * (console commands without a position, single-block history lookups).
+     */
+    public String world;
 }

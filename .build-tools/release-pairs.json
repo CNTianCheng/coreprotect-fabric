@@ -16,12 +16,10 @@
     }
   ],
   "pairs": [
-    ["# CoreProtect Fabric v1.8.1 (Minecraft 1.21 · Flagship)", "# CoreProtect Fabric v1.8.1 (Minecraft @VER@)"],
+    ["(Minecraft 1.21 · Flagship)", "(Minecraft @VER@)"],
     ["**Minecraft 1.21 flagship build**", "**Minecraft @VER@ build**"],
     ["Requirements: Minecraft **1.21**, Java **21**, Fabric Loader >= 0.16 + Fabric API", "Requirements: Minecraft **@VER@**, Java **@JAVA@**, Fabric Loader >= @LOADER@ + Fabric API"],
     ["要求：Minecraft **1.21**、Java **21**、Fabric Loader ≥ 0.16 + Fabric API", "要求：Minecraft **@VER@**、Java **@JAVA@**、Fabric Loader ≥ @LOADER@ + Fabric API"],
-    ["coreprotect-fabric-1.21-1.8.1.jar", "coreprotect-fabric-@VER@-1.8.1.jar"],
-    ["Drop `coreprotect-fabric-1.21-1.8.1.jar`", "Drop `coreprotect-fabric-@VER@-1.8.1.jar`"],
-    ["将 `coreprotect-fabric-1.21-1.8.1.jar`", "将 `coreprotect-fabric-@VER@-1.8.1.jar`"]
+    ["coreprotect-fabric-1.21-", "coreprotect-fabric-@VER@-"]
   ]
 }

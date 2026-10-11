@@ -22,6 +22,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * RETURN of {@code playerTouch} and only when the stack actually shrank: logging at
  * HEAD wrote a phantom "+item" row on every tick a player merely stood next to an
  * item that could not be picked up (pickup delay, full inventory).
+ *
+ * <p>A stack that is absorbed completely is restored to its original count before the
+ * entity is discarded, so it has to be recognised by the entity being removed.</p>
  */
 @Mixin(ItemEntity.class)
 public abstract class ItemEntityPickupMixin {
@@ -58,7 +61,15 @@ public abstract class ItemEntityPickupMixin {
         if (mod == null || !mod.config().logging.item) return;
         if (!(player instanceof ServerPlayer sp)) return;
         int taken = beforeCount - ((ItemEntity) (Object) this).getItem().getCount();
-        if (taken <= 0) return; // nothing was actually picked up
+        if (taken <= 0) {
+            // E1: a fully absorbed stack never shows up here - vanilla puts the original
+            // count back before discarding the entity (ItemEntity#playerTouch:
+            // "if (itemStack.isEmpty()) { discard(); itemStack.setCount(i); }"), so the
+            // stack size is unchanged even though the whole stack was picked up. A removed
+            // entity is exactly that case (an unsuccessful insertStack does not discard).
+            if (!((ItemEntity) (Object) this).isRemoved()) return; // nothing was actually picked up
+            taken = beforeCount;
+        }
         ServerLevel world = sp.level();
         BlockPos pos = ((ItemEntity) (Object) this).blockPosition();
         mod.database().insertItemAsync(new DatabaseManager.ItemLog(

@@ -6,12 +6,24 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+# $WorkDir decides which java.exe gets killed and which directory is cleaned up below, so
+# it has to resolve to a directory inside this repository.
+if (-not [System.IO.Path]::IsPathRooted($WorkDir)) { $WorkDir = Join-Path $root $WorkDir }
+$rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+$WorkDir = [System.IO.Path]::GetFullPath($WorkDir).TrimEnd('\')
+if (-not $WorkDir.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "invalid -WorkDir '$WorkDir': must be a directory inside $rootFull"
+}
+if (-not (Test-Path -LiteralPath $WorkDir)) { throw "missing -WorkDir '$WorkDir'" }
 $jdk = Join-Path $root ".build-tools\jdk\$Jdk"
 if (-not (Test-Path $jdk)) { $jdk = 'C:\Program Files\Java\graalvm-jdk-25.0.2+10.1' }
 $env:JAVA_HOME = $jdk
 Set-Location $WorkDir
 
-$stale = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object { $_.CommandLine -like "*$WorkDir*" }
+# Match the resolved full path (no wildcard expansion) so an unrelated JVM that merely
+# mentions the same folder name is left running.
+$stale = Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
+    Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($WorkDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
 if ($stale) { $stale | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Seconds 5 }
 
 $runDir = Join-Path $WorkDir 'run'
@@ -66,6 +78,7 @@ $cmds = @(
     @{ c = 'co lookup a:#piston'; d = 6 },
     @{ c = 'co lookup u:#hopper a:#container'; d = 6 },
     @{ c = 'co lookup a:container'; d = 6 },
+    @{ c = 'co lookup u:#container'; d = 6 },
     @{ c = 'co lookup b:white_wool'; d = 6 },
     @{ c = 'co lookup r:60 t:10m p:1'; d = 6 },
     @{ c = 'co lookup a:#tnt p:2'; d = 6 },
@@ -82,6 +95,15 @@ $cmds = @(
     @{ c = 'execute if block 7 -62 6 minecraft:dirt'; d = 2 },
     @{ c = 'co undo'; d = 12 },
     @{ c = 'execute if block 7 -62 6 minecraft:air'; d = 2 },
+    # ---- v1.9.3: an overlapping rollback/undo from the same operator is refused ----
+    # The console counts as one operator, so these three must not run at the same time as
+    # each other; when the first one is still slicing, the next two answer with the busy
+    # message instead of interleaving. (No assertion: a tiny test world may finish in one
+    # tick, in which case they simply run one after another.)
+    @{ c = 'co rollback t:5m r:80'; d = 3 },
+    @{ c = 'co rollback t:5m r:80'; d = 0 },
+    @{ c = 'co undo'; d = 0 },
+    @{ c = 'co status'; d = 12 },
     # ---- restore ----
     @{ c = 'co restore t:5m r:80'; d = 12 },
     @{ c = 'co undo'; d = 12 },

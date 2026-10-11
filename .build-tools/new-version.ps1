@@ -7,9 +7,23 @@ param(
 )
 # workspace root = parent directory of the .build-tools folder containing this script
 $root = Split-Path $PSScriptRoot -Parent
-$dest = Join-Path $root "coreprotect-fabric-$Version"
-if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-robocopy (Join-Path $root $Src) $dest /E /XD .gradle build run /NFL /NDL /NJH /NJS /NP | Out-Null
+# $Version is interpolated into a directory name that gets deleted below, so it must be a
+# plain version segment - never a path fragment that could point outside the repository.
+if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') {
+    throw "invalid -Version '$Version': expected a plain version like 1.21.11"
+}
+$rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+$srcDir = [System.IO.Path]::GetFullPath((Join-Path $rootFull $Src))
+if (-not $srcDir.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "invalid -Src '$Src': outside the repository root"
+}
+if (-not (Test-Path -LiteralPath $srcDir)) { throw "missing -Src directory '$srcDir'" }
+$dest = [System.IO.Path]::GetFullPath((Join-Path $rootFull "coreprotect-fabric-$Version"))
+if (-not $dest.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "refusing to touch '$dest': outside the repository root"
+}
+if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+robocopy $srcDir $dest /E /XD .gradle build run /NFL /NDL /NJH /NJS /NP | Out-Null
 $gp = Get-Content (Join-Path $dest 'gradle.properties') -Raw
 $gp = $gp -replace '(?m)^minecraft_version=.*$', "minecraft_version=$Version"
 $gp = $gp -replace '(?m)^yarn_mappings=.*$', "yarn_mappings=$Yarn"

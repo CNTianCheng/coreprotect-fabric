@@ -47,9 +47,9 @@ public final class CoreProtectConfig {
     public static class Lookup {
         /** Default time window (seconds) for lookups without a t: parameter. */
         public long defaultTimeSeconds = 604800;
-        /** Rows shown per lookup page. */
+        /** Rows shown per lookup page (1-1000). */
         public int maxLines = 10;
-        /** Rows shown by inspection mode. */
+        /** Rows shown by inspection mode (1-1000). */
         public int inspectLines = 8;
     }
 
@@ -59,8 +59,11 @@ public final class CoreProtectConfig {
     }
 
     public static class Permissions {
-        /** Permission level required for inspect/lookup/status/help/language (0 = everyone). */
-        public int lookupLevel = 0;
+        /**
+         * Permission level required for inspect/lookup/status/help/language.
+         * 0 = every player, 1 = moderators (default), 4 = owners only.
+         */
+        public int lookupLevel = 1;
         /** Permission level required for rollback/restore/undo/purge/reload (4 = ops). */
         public int adminLevel = 4;
     }
@@ -69,12 +72,17 @@ public final class CoreProtectConfig {
      * CoreProtect-style permission groups: when enabled, players listed in a group
      * gain the nodes in that group's {@code permissions} list (or {@code "all"}).
      * Works together with the OP-level fallback above.
+     *
+     * <p>Players are matched by UUID (with or without dashes). A plain player name is still
+     * accepted on an online-mode server; on an offline-mode server names are not identities,
+     * so name entries are ignored and only UUIDs count.
      */
     public static class PermissionGroups {
         public boolean enabled = false;
         public java.util.LinkedHashMap<String, Group> groups = new java.util.LinkedHashMap<>();
 
         public static class Group {
+            /** Player UUIDs (preferred) or names (online-mode servers only). */
             public java.util.List<String> players = new java.util.ArrayList<>();
             public java.util.List<String> permissions = new java.util.ArrayList<>();
         }
@@ -112,27 +120,31 @@ public final class CoreProtectConfig {
      * Update notifications: checks Modrinth (or a custom URL) for newer releases and
      * notifies the server console and admin players.
      */
-    /** Database tuning. */
+    /**
+     * Database tuning. These fields are volatile because /co reload rewrites them on the
+     * server thread while the database worker reads them; without a happens-before edge the
+     * worker could keep using the previous value for an unbounded time.
+     */
     public static class Database {
         /** SQLite page cache per connection, in MB (larger = faster reads, more RAM). */
-        public int cacheSizeMB = 128;
+        public volatile int cacheSizeMB = 128;
         /** WAL durability: "full" fsyncs every commit (max crash safety, default); "normal" is faster. */
-        public String syncMode = "full";
+        public volatile String syncMode = "full";
         /**
          * How long a log row may wait before it is written, in milliseconds. Rows are
          * collected for this long and committed as one transaction, which turns dozens of
          * fsyncs per second into a handful. A crash can lose at most this window (250 ms
          * by default). 0 writes each row in its own transaction (slowest, most durable).
          */
-        public int batchIntervalMs = 250;
+        public volatile int batchIntervalMs = 250;
         /** Maximum rows written in one transaction (a burst is split into several batches). */
-        public int batchMaxRows = 1000;
+        public volatile int batchMaxRows = 1000;
         /** How often the WAL is checkpointed in the background, in minutes (smaller WAL = faster crash recovery). */
-        public int checkpointMinutes = 10;
+        public volatile int checkpointMinutes = 10;
         /** How often a hot backup (VACUUM INTO) is written to <db>.backup, in minutes (0 = disabled). */
-        public int backupMinutes = 360;
+        public volatile int backupMinutes = 360;
         /** When integrity checking finds a corrupt database, restore it from <db>.backup automatically. */
-        public boolean autoRestoreBackup = true;
+        public volatile boolean autoRestoreBackup = true;
     }
 
     public static class UpdateCheck {
@@ -146,6 +158,10 @@ public final class CoreProtectConfig {
     }
 
     private transient Path path;
+    /** Largest page size accepted from the config file (rows). */
+    private static final int MAX_ROWS = 1000;
+    /** Longest default lookup window accepted from the config file (10 years, in seconds). */
+    private static final long MAX_DEFAULT_TIME_SECONDS = 315_360_000L;
     private transient boolean endpointMigrated;
     /** Set when load() had to clamp or fill a value, so the corrected config is written back. */
     private transient boolean configCorrected;
@@ -183,6 +199,7 @@ public final class CoreProtectConfig {
             } else {
                 corrected = true;
             }
+            String previousDatabaseFile = this.databaseFile;
             this.databaseFile = loaded.databaseFile;
             if (loaded.logging != null) {
                 this.logging = loaded.logging;
@@ -223,16 +240,27 @@ public final class CoreProtectConfig {
                 corrected = true;
             }
             if (this.permissionGroups.groups == null) this.permissionGroups.groups = new java.util.LinkedHashMap<>();
-            if (this.lookup.maxLines < 1) {
+            if (this.lookup.maxLines < 1 || this.lookup.maxLines > MAX_ROWS) {
                 this.lookup.maxLines = 10;
                 corrected = true;
             }
-            if (this.lookup.inspectLines < 1) {
+            if (this.lookup.inspectLines < 1 || this.lookup.inspectLines > MAX_ROWS) {
                 this.lookup.inspectLines = 8;
                 corrected = true;
             }
-            if (this.lookup.defaultTimeSeconds < 0) {
+            if (this.lookup.defaultTimeSeconds < 0
+                    || this.lookup.defaultTimeSeconds > MAX_DEFAULT_TIME_SECONDS) {
                 this.lookup.defaultTimeSeconds = 604800;
+                corrected = true;
+            }
+            // Permission levels are clamped as well: an out-of-range level used to fall through
+            // to "always pass" (adminLevel: 5 handed /co purge to every player).
+            if (this.permissions.adminLevel < 1 || this.permissions.adminLevel > 4) {
+                this.permissions.adminLevel = 4;
+                corrected = true;
+            }
+            if (this.permissions.lookupLevel < 0 || this.permissions.lookupLevel > 4) {
+                this.permissions.lookupLevel = 4;
                 corrected = true;
             }
             if (this.rollback.maxBlocks < 1) {
@@ -266,6 +294,14 @@ public final class CoreProtectConfig {
             if (this.databaseFile == null || this.databaseFile.isBlank()) {
                 this.databaseFile = "coreprotect.db";
                 corrected = true;
+            }
+            if (previousDatabaseFile != null && !previousDatabaseFile.isBlank()
+                    && !previousDatabaseFile.equals(this.databaseFile)) {
+                // The path is resolved once in DatabaseManager#open: saying nothing made
+                // /co reload look like it had moved the database when nothing happened.
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] database.file changed to '{}' - restart"
+                        + " the server for it to take effect (the database is opened at startup).",
+                        this.databaseFile);
             }
             if (corrected) configCorrected = true;
         } catch (Exception e) {

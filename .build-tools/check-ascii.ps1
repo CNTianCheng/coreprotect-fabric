@@ -19,4 +19,6 @@ if ($offenders.Count -eq 0) {
 } else {
     Write-Output "NON-ASCII FOUND - move these literals into a UTF-8 data file:"
     $offenders | ForEach-Object { Write-Output "  $_" }
+    # This script is a release gate: it has to fail the build, not just print a warning.
+    exit 1
 }

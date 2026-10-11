@@ -14,6 +14,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * Hooks every world-level block mutation entry point. Only natural events
  * (attributed through {@link NaturalBreakCause}) are logged here; player actions
  * are handled by Fabric events, so this adds almost no overhead.
+ *
+ * <p>All four injectors stay at HEAD on purpose: the hooks need the block state BEFORE
+ * the write. At RETURN {@code World#getBlockState} already reports the new state, so every
+ * natural change would compare equal and disappear from the log, and the return value of
+ * {@code removeBlock}/{@code breakBlock} says nothing about a rejected write either. The
+ * writes vanilla rejects are filtered inside the hooks instead - see
+ * {@code CoreProtectFabric#hookSetBlockState} (E11).</p>
  */
 @Mixin(World.class)
 public abstract class WorldMixin {
