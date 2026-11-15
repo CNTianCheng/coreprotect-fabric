@@ -1,23 +1,17 @@
 package net.coreprotect.fabric.container;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.coreprotect.fabric.CoreProtectFabric;
-import net.coreprotect.fabric.database.DatabaseManager;
-import net.coreprotect.fabric.util.ItemStackCodec;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.HopperBlock;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.Container;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -28,33 +22,53 @@ import net.minecraft.world.level.Level;
  * own inventory, the container above it (source) and the container it faces
  * (target) are diffed against the previous snapshot; changes are logged as
  * user {@code #hopper} at the affected container's position.
+ *
+ * <p>A double chest is one 54 slot container: the baseline is keyed by the
+ * canonical half ({@link ContainerTracker#canonicalContainerPos}) and rows are
+ * written at that position, so two hoppers touching the two halves share one
+ * baseline and a change is recorded once instead of twice.
+ *
+ * <p>Cost per tick is kept low: a cheap contents fingerprint
+ * ({@link ContainerTracker#digest}) is compared first and the full snapshot -
+ * which encodes every stack as SNBT - is only taken when the contents really
+ * changed. A container that changed is deep processed at most once per tick;
+ * a second change within the same tick is not dropped, only recorded by the
+ * next observation, which diffs against the baseline that was left behind.
  */
 public final class HopperTracker {
-        /** Per-container baseline, keyed by dimension + position so worlds never mix. */
+    /** User recorded for container changes caused by a hopper. */
+    private static final String USER = "#hopper";
+
+    /** Per-container baseline, keyed by dimension + canonical position so worlds never mix. */
     private final Map<String, Snapshot> snapshots = new ConcurrentHashMap<>();
 
     /** A container that was not observed for this long is dropped when the snapshot map has to be pruned. */
     private static final long STALE_SECONDS = 120L;
     private static final int MAX_SNAPSHOTS = 20000;
 
+    /**
+     * The state a container was last seen in. Mutable on purpose: an unchanged observation only
+     * refreshes {@link #time}, so the common case allocates nothing.
+     */
     private static final class Snapshot {
-        final Map<String, Tally> counts;
-        final long time;
+        /** Aggregated contents the next diff is computed against. */
+        Map<String, ContainerTracker.Tally> counts;
+        /** Fingerprint of {@link #counts}; see {@link ContainerTracker#digest}. */
+        long digest;
+        /** Wall clock time of the last observation, used by {@link #prune}. */
+        long time;
+        /** Server tick of the last deep pass; {@code Long.MIN_VALUE} when none happened yet. */
+        long deepTick = Long.MIN_VALUE;
         /** Identity of the observed container; a different instance means a chunk reload or a replaced block. */
         final Object container;
 
-        Snapshot(Map<String, Tally> counts, long time, Object container) {
+        Snapshot(Map<String, ContainerTracker.Tally> counts, long digest, long time, Object container, long deepTick) {
             this.counts = counts;
+            this.digest = digest;
             this.time = time;
             this.container = container;
+            this.deepTick = deepTick;
         }
-    }
-
-    /**
-     * One snapshot entry: a representative stack (its data components decide whether two stacks of
-     * the same item are interchangeable) and the summed count of everything matching it.
-     */
-    private record Tally(ItemStack sample, int count) {
     }
 
     private static String key(String wid, BlockPos pos) {
@@ -64,24 +78,25 @@ public final class HopperTracker {
     public void onHopperTick(Level world, BlockPos pos, BlockState state, HopperBlockEntity blockEntity) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null || !mod.config().logging.hopper) return;
-        if (!(world instanceof ServerLevel sw)) return;
+        if (!(world instanceof ServerLevel serverWorld)) return;
         long time = TimeUtil.now();
+        long tick = serverWorld.getGameTime();
         String wid = world.dimension().identifier().toString();
 
-        // the hopper's own inventory; while a player has this hopper's screen open the
+        // the hopper's own inventory; while a player has this container open the
         // player watch owns this container, so only the baseline is kept up to date
-        boolean watched = mod.containerTracker().watchedAt(sw, pos);
-        diffAndLog(mod, sw, wid, pos, blockEntity, time, watched);
+        boolean watched = mod.containerTracker().watchedAt(serverWorld, pos);
+        diffAndLog(mod, serverWorld, wid, pos, blockEntity, time, tick, watched);
         // source container above the hopper
         Container input = HopperBlockEntity.getContainerAt(world, pos.above());
         if (input != null && !trackedSeparately(input)) {
-            diffAndLog(mod, sw, wid, pos.above(), input, time, false);
+            diffAndLog(mod, serverWorld, wid, pos.above(), input, time, tick, false);
         }
         // target container at the hopper's facing
         Direction facing = state.getValue(HopperBlock.FACING);
         Container output = HopperBlockEntity.getContainerAt(world, pos.relative(facing));
         if (output != null && !trackedSeparately(output)) {
-            diffAndLog(mod, sw, wid, pos.relative(facing), output, time, false);
+            diffAndLog(mod, serverWorld, wid, pos.relative(facing), output, time, tick, false);
         }
     }
 
@@ -96,48 +111,63 @@ public final class HopperTracker {
     }
 
     private void diffAndLog(CoreProtectFabric mod, ServerLevel world, String wid, BlockPos pos, Container inv,
-            long time, boolean suppressLog) {
-        Map<String, Tally> after = snapshot(world, inv);
-        Object container = world.getBlockEntity(pos);
+            long time, long tick, boolean suppressLog) {
+        // a double chest is one container: key and log it at the canonical half, otherwise each
+        // hopper keeps its own baseline and every transfer is written twice
+        BlockPos canonical = ContainerTracker.canonicalContainerPos(world, pos);
+        // The merged inventory is read from its canonical half as well: the same double chest seen
+        // through the other half hands out the two 27 slot halves in the opposite order, which
+        // would make the fingerprint oscillate and force a deep pass on every single tick.
+        Container observed = ContainerTracker.containerAt(world, canonical);
+        if (observed == null) observed = inv;
+        String key = key(wid, canonical);
+        Object container = world.getBlockEntity(canonical);
         // inventories without a block entity (entities, provider wrappers) are identified by type
-        if (container == null) container = inv.getClass();
-        Snapshot previous = snapshots.put(key(wid, pos), new Snapshot(after, time, container));
-        prune(time);
-        // first observation, or a different container instance at this position (chunk
-        // reload, replaced block): establish a fresh baseline instead of diffing against
-        // the contents of another container
-        if (previous == null || previous.container != container) return;
-        if (suppressLog) return;
-        Map<String, Tally> before = previous.counts;
-        boolean logged = false;
-        for (Map.Entry<String, Tally> entry : after.entrySet()) {
-            String id = entry.getKey();
-            Tally now = entry.getValue();
-            Tally old = before.get(id);
-            int delta = now.count() - (old == null ? 0 : old.count());
-            if (delta == 0) continue;
-            logged = true;
-            mod.database().insertContainerAsync(new DatabaseManager.ContainerLog(
-                    0, time, "#hopper", wid,
-                    pos.getX(), pos.getY(), pos.getZ(),
-                    delta > 0 ? DatabaseManager.CONTAINER_DEPOSIT : DatabaseManager.CONTAINER_WITHDRAW,
-                    BuiltInRegistries.ITEM.getKey(now.sample().getItem()).toString(), Math.abs(delta),
-                    ItemStackCodec.encodeIdentity(now.sample(), world.registryAccess())));
+        if (container == null) container = observed.getClass();
+        long digest = ContainerTracker.digest(observed);
+
+        Snapshot snapshot = snapshots.get(key);
+        if (snapshot == null || snapshot.container != container) {
+            // first observation, or a different container instance at this position (chunk
+            // reload, replaced block): establish a fresh baseline instead of diffing against
+            // the contents of another container
+            snapshot = new Snapshot(ContainerTracker.snapshot(world, observed), digest, time, container, tick);
+            snapshots.put(key, snapshot);
+            prune(time);
+            return;
         }
-        for (Map.Entry<String, Tally> entry : before.entrySet()) {
-            if (after.containsKey(entry.getKey())) continue;
-            logged = true;
-            Tally old = entry.getValue();
-            mod.database().insertContainerAsync(new DatabaseManager.ContainerLog(
-                    0, time, "#hopper", wid,
-                    pos.getX(), pos.getY(), pos.getZ(),
-                    DatabaseManager.CONTAINER_WITHDRAW,
-                    BuiltInRegistries.ITEM.getKey(old.sample().getItem()).toString(), old.count(),
-                    ItemStackCodec.encodeIdentity(old.sample(), world.registryAccess())));
+        snapshot.time = time;
+        // cheap equality first: unchanged contents need no snapshot and no SNBT encoding at all
+        if (snapshot.digest == digest) return;
+        // at most one deep pass per container and tick. A change that happened after that pass is
+        // not dropped: the baseline is left behind, so the next observation of this container
+        // records the cumulative difference.
+        if (snapshot.deepTick == tick) return;
+        Map<String, ContainerTracker.Tally> after = ContainerTracker.snapshot(world, observed);
+        snapshot.deepTick = tick;
+        if (suppressLog) {
+            // a player has this container open: the player watch owns the row, so only the
+            // baseline is kept up to date here
+            snapshot.counts = after;
+            snapshot.digest = digest;
+            return;
         }
+        boolean logged = ContainerTracker.logDiff(mod, USER, world, wid, canonical, snapshot.counts, after, time);
+        snapshot.counts = after;
+        snapshot.digest = digest;
         // the hopper moved items here: a player watching this container must not be
         // blamed for them when the screen closes
-        if (logged) ContainerTracker.rebaseline(world, pos);
+        if (logged) ContainerTracker.rebaseline(world, canonical);
+    }
+
+    /**
+     * Drops the baseline of a container that is being removed, so a later observation of that
+     * position establishes a fresh baseline instead of diffing against contents that are gone.
+     */
+    void forget(ServerLevel world, BlockPos pos) {
+        if (world == null || pos == null) return;
+        String wid = world.dimension().identifier().toString();
+        snapshots.remove(key(wid, ContainerTracker.canonicalContainerPos(world, pos)));
     }
 
     /**
@@ -155,30 +185,5 @@ public final class HopperTracker {
         for (int i = 0; i < entries.size() - target; i++) {
             snapshots.remove(entries.get(i).getKey());
         }
-    }
-
-    /**
-     * Snapshots a container. Two stacks of the same item count as one entry only when they carry the
-     * same data components, so a hopper moving an enchanted item is logged and restorable as one.
-     */
-    private static Map<String, Tally> snapshot(ServerLevel world, Container inv) {
-        Map<String, Tally> map = new HashMap<>();
-        HolderLookup.Provider registries = world.registryAccess();
-        for (int i = 0; i < inv.getContainerSize(); i++) {
-            ItemStack stack = inv.getItem(i);
-            if (stack.isEmpty()) continue;
-            String id = ItemStackCodec.encodeIdentity(stack, registries);
-            if (id == null) {
-                // a stack whose components cannot be encoded is still tracked, just without them
-                id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
-            }
-            Tally tally = map.get(id);
-            if (tally == null) {
-                map.put(id, new Tally(stack.copyWithCount(1), stack.getCount()));
-            } else {
-                map.put(id, new Tally(tally.sample(), tally.count() + stack.getCount()));
-            }
-        }
-        return map;
     }
 }

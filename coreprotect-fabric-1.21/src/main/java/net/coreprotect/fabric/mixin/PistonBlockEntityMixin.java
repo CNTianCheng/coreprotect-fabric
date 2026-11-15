@@ -27,8 +27,11 @@ public abstract class PistonBlockEntityMixin {
         NaturalBreakCause.set("#piston");
     }
 
+    // RETURN rather than TAIL, matching the flagship tree: the closing injector then runs on every
+    // exit path of the vanilla body (1.21 has a single exit here, so both coincide today) and the
+    // #piston window can never leak into later block changes on this thread.
     @Inject(method = "tick(Lnet/minecraft/world/World;Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/BlockState;Lnet/minecraft/block/entity/PistonBlockEntity;)V",
-            at = @At("TAIL"))
+            at = @At("RETURN"))
     private static void coreprotect$pistonEnd(World world, BlockPos pos, BlockState state, PistonBlockEntity blockEntity,
                                               CallbackInfo ci) {
         NaturalBreakCause.clear("#piston");

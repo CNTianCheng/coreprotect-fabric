@@ -39,14 +39,14 @@
 
 ### 4. Inspection Mode
 
-After `/co inspect`: **left-click** a block to view its history, **right-click** to view container transactions or the adjacent block, **place a block** to run a lookup for that block type. Block breaking is disabled in inspection mode.
+After `/co inspect`: **left-click** a block to view its history, **right-click** to view container transactions or the adjacent block, **right-click with a block in hand** to run a lookup for that block type without placing it. Block breaking is disabled in inspection mode.
 
 ### 5. Data Maintenance & Multi-Language
 
 - `/co purge t:<time>` prunes old data, `/co reload` hot-reloads, `/co status` shows statistics
 - **Five languages**: English / 简体中文 / 繁體中文 / 日本語 / Русский, automatically following the client language, with manual switching via `/co language <code>` (persisted per player)
 
-## 1.21-Build Enhancements (v1.9.1 Flagship)
+## 1.21-Build Enhancements (v1.9.4 Flagship)
 
 The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared feature set:
 
@@ -66,16 +66,19 @@ The `coreprotect-fabric-1.21/` project keeps evolving on top of the shared featu
 | v1.8.0 | Crash protection: per-commit WAL fsync (synchronous=full), unclean-shutdown detection with startup quick_check, periodic WAL checkpoints |
 | v1.8.1 | Power-loss protection: periodic hot backups (VACUUM INTO, default every 6 hours), automatic restore from the backup when corruption is detected (original kept aside), reader connections reopen on restore |
 | v1.8.2 | **Bug-fix release for all three full-feature builds** (1.21 / 1.21.11 / 26.1.2): broken `#fire` logging, sign front/back faces, phantom item drop/pickup rows, rollback safety limit and container undo, `/co undo` reverting an unrelated operation, CoreProtect-compatible `a:container` and friends, `e:`/radius/case-insensitive filters, crash-marker and shutdown ordering, bStats opt-out and update-check spam (see each release page for the full list) |
-| v1.9.1 | Complete Russian (`ru_ru`) translation added: all 114 keys match `en_us` and every `{0}` placeholder is preserved; switch with `/co language ru_ru`, or let it follow a Russian client automatically |
+| v1.9.4 | Second audit round, 84 findings: two critical defects (piston coordinates recorded offset, the `#fire` window never closing), rollback + undo back to net zero with container contents kept in the undo record, double chest and duplicate hopper logging, dropped rows now visible, signed commands logged again, and a blacklist for credential commands |
+| v1.9.3 | 60 security and data-integrity fixes: hardened permission checks (permissions.lookupLevel defaults to 1, the coreprotect.* node prefix is stripped, groups match by UUID), exact rollback/restore replay that keeps container NBT, undo records flushed every 5 s, and § filtering in chat and signs |
+| v1.9.2 | Far less disk load: batched writes (every 250 ms or 1000 rows) and every lookup moved off the server thread |
+| v1.9.1 | Complete Russian (u_ru) translation added: all 114 keys match `en_us` and every `{0}` placeholder is preserved; switch with `/co language ru_ru`, or let it follow a Russian client automatically |
 | v1.9.0 | Much smaller database (schema v3): user/world/action and block states are dictionary-encoded and every log table keeps just 2 indexes — measured 46.38MB -> 24.32MB on 417k rows (-47.6%, 116.6 -> 61.2 bytes per row); existing databases migrate automatically on first start and keep a `coreprotect.db.bak-v2` backup |
 
 ## Version Matrix (16 Builds)
 
-Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requirement is split into two tiers (Java 21 for 1.21.x, Java 25 for 26.x).
+Requirements differ per branch (each jar declares its own minimums): **1.21** needs Fabric Loader ≥ 0.16.9 + Fabric API ≥ 0.102.0+1.21; **1.21.11** needs Loader ≥ 0.19.3 + API ≥ 0.141.6+1.21.11; **26.1.2** needs Loader ≥ 0.19.3 + API ≥ 0.155.2+26.1.2. The Java requirement is split into two tiers (Java 21 for 1.21.x, Java 25 for 26.x).
 
 | Minecraft | Mod version | Jar file | Project directory | Java |
 |---|---|---|---|---|
-| 1.21 | 1.9.1 (flagship) | `coreprotect-fabric-1.21-1.9.1.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.9.4 (flagship) | `coreprotect-fabric-1.21-1.9.4.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |
@@ -86,23 +89,23 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.9.1 | `coreprotect-fabric-1.21.11-1.9.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.9.4 | `coreprotect-fabric-1.21.11-1.9.4.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.9.1 | `coreprotect-fabric-26.1.2-1.9.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.9.4 | `coreprotect-fabric-26.1.2-1.9.4.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. **1.21, 1.21.11 and 26.1.2 all ship the complete v1.9.1 feature set** (identical commands, logging coverage, colors, database schema and crash/power-loss protection); the remaining builds carry the v1.0.0 core feature set. Each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
+> Note: 1.21.2 ~ 1.21.11 use yarn mappings, 26.x uses official mojmap mappings. **1.21, 1.21.11 and 26.1.2 all ship the complete v1.9.4 feature set** (identical commands, logging coverage, colors, database schema and crash/power-loss protection); the remaining builds carry the v1.0.0 core feature set. Each project directory contains its own `OVERVIEW.md` / `OVERVIEW_EN.md` and `README.md`.
 
 ## Installation
 
 1. Pick the jar matching your server's **exact Minecraft version** from the table above (1.21.x needs **Java 21**, 26.x needs **Java 25**).
-2. Install **Fabric Loader ≥ 0.16** and **Fabric API** on the server.
+2. Install **Fabric Loader** and the matching **Fabric API**: 1.21 needs Loader ≥ 0.16.9 + API ≥ 0.102.0+1.21, 1.21.11 needs Loader ≥ 0.19.3 + API ≥ 0.141.6+1.21.11, 26.1.2 needs Loader ≥ 0.19.3 + API ≥ 0.155.2+26.1.2.
 3. Drop the jar into `mods/` and start the server. On first launch the configuration is generated at `config/coreprotect-fabric.json` and the SQLite database is created in the game directory.
 
 ## Technical Architecture (Shared by All Builds)
 
-- **Event capture**: Fabric API events (break/place/use/kill/chat/session) plus mixins hooking natural events, attributing world changes without player involvement to virtual users such as `#fire` and `#water` via a thread-local cause-tracking mechanism (best-effort, `defaultRequire: 0`)
+- **Event capture**: Fabric API events (break/place/use/kill/chat/session) plus mixins hooking natural events, attributing world changes without player involvement to virtual users such as `#fire` and `#water` via a thread-local cause-tracking mechanism (mandatory mixins, `defaultRequire: 1`: a hook that fails to apply makes the server fail at startup instead of silently dropping records)
 - **Storage**: SQLite (WAL mode) with a single async worker thread — the main game thread never touches the disk; the schema stays close to CoreProtect: `co_block` / `co_container` / `co_entity` / `co_session` / `co_command` / `co_chat` / `co_user` plus the dictionary tables added in v3: `co_state` / `co_name` / `co_world` / `co_action` (the three full-feature builds also add `co_item` / `co_sign`)
 - **Rollback engine**: newest log per position wins; "rollback applies the old state, restore applies the new state" with object-level `BlockState` comparison; container item operations run first so contents are never lost when a container block is removed
 - **Translation**: server-side resolution per player with the fallback chain: `/co language` override → client locale → configured default → `en_us`
@@ -111,7 +114,7 @@ Every build requires **Fabric Loader ≥ 0.16 + Fabric API**; the Java requireme
 
 - Kill records are not rolled back (same as the original CoreProtect); large rollbacks run on the main thread (protected by the `maxBlocks` cap)
 - Container rollback uses a simplified item-recovery strategy: withdrawn items are preferably taken from the container and returned to the operator, with missing amounts compensated
-- Natural-event hooks are best-effort: if a future game update breaks an individual hook, only that category stops logging — everything else keeps working
+- Natural-event hooks are mandatory mixins (`defaultRequire: 1`): if a future game update breaks one, the server fails at startup with an error naming the hook instead of silently losing a category of records
 - All three full-feature builds (1.21 / 1.21.11 / 26.1.2) log hoppers (`#hopper`), droppers/dispensers (`#dropper`/`#dispenser`), item drops and sign edits, and include the `/co i` shorthand, permission groups, `/co online` and the data-retention limit; the remaining builds carry the v1.0.0 core feature set without them
 
 ## License & Credits

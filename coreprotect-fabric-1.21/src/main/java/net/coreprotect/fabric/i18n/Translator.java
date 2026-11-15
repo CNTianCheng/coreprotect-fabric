@@ -40,6 +40,8 @@ public final class Translator {
     private final Map<String, String> storedLanguages = new ConcurrentHashMap<>();
     /** Keys already reported as missing, so a broken translation file is logged once (E19). */
     private final Set<String> warnedKeys = ConcurrentHashMap.newKeySet();
+    /** Keys reported as unformattable, per language, so a broken pattern is logged once (L4-16). */
+    private final Set<String> warnedFormats = ConcurrentHashMap.newKeySet();
     private final List<String> available = new ArrayList<>();
     private String defaultLanguage = "en_us";
 
@@ -125,11 +127,44 @@ public final class Translator {
     }
 
     public String get(ServerPlayerEntity player, String key, Object... args) {
-        return format(lookup(localeOf(player), key), args);
+        return resolve(localeOf(player), key, args);
     }
 
     public String get(String key, Object... args) {
-        return format(lookup(defaultLanguage, key), args);
+        return resolve(defaultLanguage, key, args);
+    }
+
+    /**
+     * Looks the key up in {@code language} and formats it.
+     *
+     * <p>A pattern the requested locale cannot format (a stray quote, a translation that lost a
+     * placeholder) used to be printed to the player as raw {@code MessageFormat} text, because
+     * the fallback returned the broken pattern of the CURRENT language. The en_us pattern is
+     * retried instead, so a bad translation degrades to English rather than to braces (L4-16).
+     */
+    private String resolve(String language, String key, Object... args) {
+        String pattern = lookup(language, key);
+        if (args == null || args.length == 0) return pattern;
+        String formatted = format(pattern, args);
+        if (formatted != null) return formatted;
+        if (warnedFormats.add(language + '\u0000' + key)) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Translation '{}' in language '{}' cannot be"
+                    + " formatted (placeholder mismatch or unbalanced quote); using en_us.", key, language);
+        }
+        if (!"en_us".equalsIgnoreCase(language)) {
+            String english = rawPattern("en_us", key);
+            if (english != null && !english.equals(pattern)) {
+                String retried = format(english, args);
+                if (retried != null) return retried;
+            }
+        }
+        return pattern;
+    }
+
+    /** The raw pattern stored in one language file, without the fallback chain. */
+    private String rawPattern(String code, String key) {
+        Map<String, String> map = languages.get(code);
+        return map == null ? null : map.get(key);
     }
 
     private String lookup(String code, String key) {
@@ -160,12 +195,17 @@ public final class Translator {
         return new ArrayList<>(chain);
     }
 
+    /**
+     * Formats a pattern, or returns {@code null} when the pattern cannot be formatted at all
+     * (unbalanced quote / broken placeholder): the caller falls back to en_us in that case.
+     */
     private static String format(String pattern, Object... args) {
+        if (pattern == null) return null;
         if (args == null || args.length == 0) return pattern;
         try {
             return MessageFormat.format(escapeQuotes(pattern), args);
         } catch (IllegalArgumentException e) {
-            return pattern;
+            return null;
         }
     }
 

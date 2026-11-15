@@ -7,12 +7,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'lib\kill-java.ps1')
+# Resolve and validate -WorkDir before anything starts or gets killed: an unvalidated path used
+# to make the java.exe filter below match an unrelated server process (F11/L5-06).
+$WorkDir = Assert-WorkDir -WorkDir $WorkDir -Root $root
 $jdk = Join-Path $root ".build-tools\jdk\$Jdk"
 if (-not (Test-Path $jdk)) { $jdk = 'C:\Program Files\Java\graalvm-jdk-25.0.2+10.1' }
 $env:JAVA_HOME = $jdk
 Set-Location $WorkDir
-$stale = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object { $_.CommandLine -like "*$WorkDir*" }
-if ($stale) { $stale | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Seconds 6 }
+Stop-StaleJava -WorkDir $WorkDir -SettleSeconds 6
 
 # seed the run directory with a database that still uses the old schema
 $runDir = Join-Path $WorkDir 'run'

@@ -1,5 +1,8 @@
 package net.coreprotect.fabric.command;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.Criteria;
 import net.coreprotect.fabric.util.TimeUtil;
@@ -18,13 +21,28 @@ public final class ParamParser {
     private ParamParser() {
     }
 
-    public record ParseResult(Criteria criteria, String errorKey, Object[] errorArgs) {
-        static ParseResult ok(Criteria c) {
-            return new ParseResult(c, null, null);
+    /**
+     * A value the parser had to adjust (a clamped radius or page). The command reports
+     * these so a silently narrowed scan can never be mistaken for a complete one.
+     */
+    public record Notice(String key, Object[] args) {
+    }
+
+    /**
+     * Parse result. Besides the criteria the caller learns whether the user bounded the
+     * selection themselves ({@code u:}, {@code t:} or {@code r:}) - destructive commands
+     * require that, because {@code defaultTime} pre-fills {@code c.time} and a prefilled
+     * value cannot be told apart from an explicit one.
+     */
+    public record ParseResult(Criteria criteria, String errorKey, Object[] errorArgs,
+                              boolean explicitUser, boolean explicitTime, boolean explicitRadius,
+                              List<Notice> notices) {
+        static ParseResult ok(Criteria c, boolean user, boolean time, boolean radius, List<Notice> notices) {
+            return new ParseResult(c, null, null, user, time, radius, List.copyOf(notices));
         }
 
         static ParseResult error(String key, Object... args) {
-            return new ParseResult(null, key, args);
+            return new ParseResult(null, key, args, false, false, false, List.of());
         }
     }
 
@@ -44,6 +62,10 @@ public final class ParamParser {
                 : 0;
         c.action = "block";
         c.page = 1;
+        boolean explicitUser = false;
+        boolean explicitTime = false;
+        boolean explicitRadius = false;
+        List<Notice> notices = new ArrayList<>();
 
         String trimmed = raw == null ? "" : raw.trim();
         if (!trimmed.isEmpty()) {
@@ -54,6 +76,7 @@ public final class ParamParser {
                     Integer page = parseInt(token);
                     if (bareAsUser && page == null) {
                         c.user = token;
+                        explicitUser = true;
                         continue;
                     }
                     if (page == null) return ParseResult.error("coreprotect.error.invalid_param", token);
@@ -63,12 +86,16 @@ public final class ParamParser {
                 String k = token.substring(0, idx).toLowerCase();
                 String v = token.substring(idx + 1);
                 switch (k) {
-                    case "u" -> c.user = v;
+                    case "u" -> {
+                        c.user = v;
+                        explicitUser = true;
+                    }
                     case "t" -> {
                         Long seconds = TimeUtil.parseSeconds(v);
                         // a positive duration is required: t:0 would otherwise mean "everything"
                         if (seconds == null || seconds <= 0) return ParseResult.error("coreprotect.error.invalid_time", v);
                         c.time = TimeUtil.now() - seconds;
+                        explicitTime = true;
                     }
                     case "a" -> c.action = v.toLowerCase();
                     case "r" -> {
@@ -77,6 +104,10 @@ public final class ParamParser {
                         // r: was only checked for being positive, so r:2147483647 made the
                         // distance filter scan and compare the whole database.
                         c.radius = Math.min(r, MAX_RADIUS);
+                        explicitRadius = true;
+                        if (r > MAX_RADIUS) {
+                            notices.add(new Notice("coreprotect.notice.radius_clamped", new Object[]{r, MAX_RADIUS}));
+                        }
                     }
                     case "b" -> c.block = v.toLowerCase();
                     case "e" -> c.exclude = v.toLowerCase();
@@ -86,6 +117,9 @@ public final class ParamParser {
                         // A page number is used as a SQL OFFSET: unbounded values only waste
                         // a full scan (and p == Integer.MAX_VALUE overflowed the page footer).
                         c.page = Math.min(p, MAX_PAGE);
+                        if (p > MAX_PAGE) {
+                            notices.add(new Notice("coreprotect.notice.page_clamped", new Object[]{p, MAX_PAGE}));
+                        }
                     }
                     default -> {
                         return ParseResult.error("coreprotect.error.invalid_param", token);
@@ -93,7 +127,7 @@ public final class ParamParser {
                 }
             }
         }
-        return ParseResult.ok(c);
+        return ParseResult.ok(c, explicitUser, explicitTime, explicitRadius, notices);
     }
 
     private static Integer parseInt(String s) {

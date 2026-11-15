@@ -219,18 +219,10 @@ if ($DryRun) { Write-Host 'mode     : DRY RUN - nothing will be uploaded' }
 
 # ---------------------------------------------------------------- plan
 
-# Reads the version string out of fabric.mod.json inside a built jar.
-function Get-JarModVersion([string]$path) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($path)
-    try {
-        $entry = $zip.Entries | Where-Object { $_.FullName -eq 'fabric.mod.json' } | Select-Object -First 1
-        if (-not $entry) { throw "$path does not contain fabric.mod.json" }
-        $reader = New-Object System.IO.StreamReader($entry.Open())
-        try { return ([string](($reader.ReadToEnd() | ConvertFrom-Json).version)).Trim() }
-        finally { $reader.Dispose() }
-    } finally { $zip.Dispose() }
-}
+# fabric.mod.json parsing is shared with .build-tools\release.ps1 (lib\jar-manifest.ps1): it
+# returns the packaged version plus the minecraft versions the jar declares, so a jar built for
+# 1.21 can never be uploaded with game_versions = ["1.21.11"] (audit L5-12).
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'lib\jar-manifest.ps1')
 
 # A stale jar in build/libs would otherwise be published as the new version, so every jar is
 # checked before anything is uploaded: its SHA-256, the version compiled into it, the tree's
@@ -248,6 +240,8 @@ foreach ($v in $versions) {
     $shaShort = ''
     $shaFull = ''
     $jarVersion = ''
+    $jarMc = ''
+    $mcProblem = ''
     $treeVersion = ''
     $stale = ''
     if ($jarOk) {
@@ -255,7 +249,25 @@ foreach ($v in $versions) {
         $sizeMb = [math]::Round($jar.Length / 1MB, 2)
         $shaFull = (Get-FileHash -LiteralPath $jarPath -Algorithm SHA256).Hash
         $shaShort = $shaFull.Substring(0, 12)
-        $jarVersion = Get-JarModVersion $jarPath
+        $info = Get-JarModInfo $jarPath
+        $jarVersion = $info.Version
+        # The jar's own minecraft dependency has to agree with what versions.json tells Modrinth.
+        # An exact declaration is compared one to one; a range is not guessed at, it is printed
+        # as a note so the operator still sees what the jar claims.
+        $mcDeclared = @($info.Minecraft | Where-Object { $_ })
+        $mcWanted = @($v.game_versions | ForEach-Object { [string]$_ })
+        $jarMc = $mcDeclared -join ','
+        if ($mcDeclared.Count -eq 0) {
+            $mcProblem = 'fabric.mod.json declares no minecraft dependency'
+        } elseif (@($mcDeclared | Where-Object { $_ -match '^[0-9][0-9A-Za-z._+-]*$' }).Count -ne $mcDeclared.Count) {
+            Write-Host ("  note: {0} declares minecraft '{1}', a range that is not compared" -f $jarRel, $jarMc)
+        } else {
+            $missingMc = @($mcWanted | Where-Object { $mcDeclared -notcontains $_ })
+            $extraMc = @($mcDeclared | Where-Object { $mcWanted -notcontains $_ })
+            if ($missingMc.Count -gt 0 -or $extraMc.Count -gt 0) {
+                $mcProblem = "versions.json says game_versions '$($mcWanted -join ',')' but the jar was built for '$jarMc'"
+            }
+        }
         $gpPath = Join-Path $Root (Join-Path $projectDir 'gradle.properties')
         if (Test-Path -LiteralPath $gpPath) {
             $m = [regex]::Match((Read-Utf8 $gpPath), '(?m)^mod_version=(.*)$')
@@ -278,6 +290,8 @@ foreach ($v in $versions) {
         JarOk   = $jarOk
         SizeMb  = $sizeMb
         JarVer  = $jarVersion
+        JarMc   = $jarMc
+        McBad   = $mcProblem
         TreeVer = $treeVersion
         Sha256  = $shaShort
         Stale   = $stale
@@ -293,6 +307,10 @@ $mismatch = @($plan | Where-Object { $_.JarVer -ne $_.Version })
 if ($mismatch.Count -gt 0) {
     throw "jar/version mismatch: $(($mismatch | ForEach-Object { "$($_.Jar) was built as '$($_.JarVer)' but versions.json says '$($_.Version)'" }) -join '; ')"
 }
+$mcMismatch = @($plan | Where-Object { $_.JarOk -and $_.McBad })
+if ($mcMismatch.Count -gt 0) {
+    throw "game_versions/minecraft mismatch: $(($mcMismatch | ForEach-Object { "$($_.Jar): $($_.McBad)" }) -join '; ')"
+}
 $drift = @($plan | Where-Object { $_.TreeVer -and $_.TreeVer -ne $_.Version })
 if ($drift.Count -gt 0) {
     throw "gradle.properties/versions.json drift: $(($drift | ForEach-Object { "$($_.Jar): the tree has mod_version=$($_.TreeVer) while versions.json says $($_.Version)" }) -join '; ')"
@@ -301,7 +319,7 @@ $stalePlan = @($plan | Where-Object { $_.Stale })
 if ($stalePlan.Count -gt 0) {
     throw "stale jar(s) - rebuild before publishing: $(($stalePlan | ForEach-Object { "$($_.Jar): $($_.Stale)" }) -join '; ')"
 }
-Write-Host ("jars verified: {0}" -f (($plan | ForEach-Object { "$($_.Version) mc=$($_.Mc) $($_.SizeMb)MB sha256:$($_.Sha256)" }) -join ' | '))
+Write-Host ("jars verified: {0}" -f (($plan | ForEach-Object { "$($_.Version) mc=$($_.Mc) jar-mc=$($_.JarMc) $($_.SizeMb)MB sha256:$($_.Sha256)" }) -join ' | '))
 
 if ($DryRun) {
     Write-Host '--- project payload (create) ---'
@@ -325,7 +343,9 @@ if ($DryRun) {
     Write-Host (($preview | ConvertTo-Json -Depth 6))
     Write-Host '--- version payloads ---'
     foreach ($v in $versions) {
-        Write-Host ("  {0,-16} mc={1,-8} loaders={2} type={3} env={4}" -f $v.version_number, ($v.game_versions -join ','), ($v.loaders -join ','), $v.version_type, $v.environment)
+        # No "env=" column: versions.json no longer carries the dead environment field (L5-15)
+        # and the payload never sends one.
+        Write-Host ("  {0,-16} mc={1,-8} jar-mc={2,-8} loaders={3} type={4}" -f $v.version_number, ($v.game_versions -join ','), ($plan | Where-Object { $_.Version -eq $v.version_number } | Select-Object -First 1).JarMc, ($v.loaders -join ','), $v.version_type)
     }
     Write-Host '--- target ---'
     Write-Host "  https://modrinth.com/mod/$($project.slug)"

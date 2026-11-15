@@ -6,6 +6,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'lib\kill-java.ps1')
+# Resolve and validate -WorkDir before anything starts or gets killed: an unvalidated path used
+# to make the java.exe filter below match an unrelated server process (F11/L5-06).
+$WorkDir = Assert-WorkDir -WorkDir $WorkDir -Root $root
 $jdk = Join-Path $root ".build-tools\jdk\$Jdk"
 if (-not (Test-Path $jdk)) { $jdk = 'C:\Program Files\Java\graalvm-jdk-25.0.2+10.1' }
 $env:JAVA_HOME = $jdk
@@ -13,12 +17,7 @@ Write-Host "JAVA_HOME=$jdk"
 
 Set-Location $WorkDir
 # make sure no leftover server from an earlier run still holds the world/database files
-$stale = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object { $_.CommandLine -like "*$WorkDir*" }
-if ($stale) {
-    $stale | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Write-Host "killed $($stale.Count) leftover server process(es)"
-    Start-Sleep -Seconds 5
-}
+Stop-StaleJava -WorkDir $WorkDir
 $runDir = Join-Path $WorkDir 'run'
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 Set-Content -Path (Join-Path $runDir 'eula.txt') -Value 'eula=true' -Force

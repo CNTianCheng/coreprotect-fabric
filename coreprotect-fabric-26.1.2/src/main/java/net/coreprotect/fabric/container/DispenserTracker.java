@@ -1,21 +1,15 @@
 package net.coreprotect.fabric.container;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.coreprotect.fabric.CoreProtectFabric;
-import net.coreprotect.fabric.database.DatabaseManager;
-import net.coreprotect.fabric.util.ItemStackCodec;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 import net.minecraft.world.level.block.entity.DropperBlockEntity;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 
@@ -25,33 +19,42 @@ import net.minecraft.core.BlockPos;
  * scheduled tick (catches deposits and previous dispenses) and again right
  * after a dispense (catches one-shot activations). Both blocks are covered
  * because {@code DropperBlock} inherits {@code DispenserBlock#scheduledTick}.
+ *
+ * <p>The cheap contents fingerprint ({@link ContainerTracker#digest}) is
+ * compared before any full snapshot is taken, so a scheduled tick that changes
+ * nothing costs no item encoding. The post-dispense observation is deliberately
+ * not capped per tick (unlike {@link HopperTracker}): a one-shot activation may
+ * never be followed by another scheduled tick in time, so deferring it would
+ * turn a logged dispense into an unlogged one.
  */
 public final class DispenserTracker {
-        /** Per-container baseline, keyed by dimension + position so worlds never mix. */
+    /** Per-container baseline, keyed by dimension + position so worlds never mix. */
     private final Map<String, Snapshot> snapshots = new ConcurrentHashMap<>();
 
     /** A container that was not observed for this long is dropped when the snapshot map has to be pruned. */
     private static final long STALE_SECONDS = 120L;
     private static final int MAX_SNAPSHOTS = 20000;
 
+    /**
+     * The state a container was last seen in. Mutable on purpose: an unchanged observation only
+     * refreshes {@link #time}, so the common case allocates nothing.
+     */
     private static final class Snapshot {
-        final Map<String, Tally> counts;
-        final long time;
+        /** Aggregated contents the next diff is computed against. */
+        Map<String, ContainerTracker.Tally> counts;
+        /** Fingerprint of {@link #counts}; see {@link ContainerTracker#digest}. */
+        long digest;
+        /** Wall clock time of the last observation, used by {@link #prune}. */
+        long time;
         /** Identity of the observed container; a different instance means a chunk reload or a replaced block. */
         final Object container;
 
-        Snapshot(Map<String, Tally> counts, long time, Object container) {
+        Snapshot(Map<String, ContainerTracker.Tally> counts, long digest, long time, Object container) {
             this.counts = counts;
+            this.digest = digest;
             this.time = time;
             this.container = container;
         }
-    }
-
-    /**
-     * One snapshot entry: a representative stack (its data components decide whether two stacks of
-     * the same item are interchangeable) and the summed count of everything matching it.
-     */
-    private record Tally(ItemStack sample, int count) {
     }
 
     private static String key(String wid, BlockPos pos) {
@@ -76,47 +79,42 @@ public final class DispenserTracker {
         String user = be instanceof DropperBlockEntity ? "#dropper" : "#dispenser";
         long time = TimeUtil.now();
         String wid = world.dimension().identifier().toString();
+        long digest = ContainerTracker.digest(dispenser);
 
-        Map<String, Tally> after = snapshot(world, dispenser);
-        Snapshot previous = snapshots.put(key(wid, pos), new Snapshot(after, time, dispenser));
-        prune(time);
-        // first observation, or a different container instance at this position (chunk
-        // reload, replaced block): establish a fresh baseline instead of diffing against
-        // the contents of another container
-        if (previous == null || previous.container != dispenser) return;
+        String key = key(wid, pos);
+        Snapshot previous = snapshots.get(key);
+        if (previous == null || previous.container != dispenser) {
+            // first observation, or a different container instance at this position (chunk
+            // reload, replaced block): establish a fresh baseline instead of diffing against
+            // the contents of another container
+            snapshots.put(key, new Snapshot(ContainerTracker.snapshot(world, dispenser), digest, time, dispenser));
+            prune(time);
+            return;
+        }
+        previous.time = time;
+        // cheap equality first: the scheduled tick that changed nothing needs no snapshot at all
+        if (previous.digest == digest) return;
+        Map<String, ContainerTracker.Tally> before = previous.counts;
+        Map<String, ContainerTracker.Tally> after = ContainerTracker.snapshot(world, dispenser);
+        previous.counts = after;
+        previous.digest = digest;
         // while a player has this container open the player watch owns the diff, so only
         // the baseline is kept up to date here
         if (mod.containerTracker().watchedAt(world, pos)) return;
-        Map<String, Tally> before = previous.counts;
-        boolean logged = false;
-        for (Map.Entry<String, Tally> entry : after.entrySet()) {
-            String id = entry.getKey();
-            Tally now = entry.getValue();
-            Tally old = before.get(id);
-            int delta = now.count() - (old == null ? 0 : old.count());
-            if (delta == 0) continue;
-            logged = true;
-            mod.database().insertContainerAsync(new DatabaseManager.ContainerLog(
-                    0, time, user, wid,
-                    pos.getX(), pos.getY(), pos.getZ(),
-                    delta > 0 ? DatabaseManager.CONTAINER_DEPOSIT : DatabaseManager.CONTAINER_WITHDRAW,
-                    BuiltInRegistries.ITEM.getKey(now.sample().getItem()).toString(), Math.abs(delta),
-                    ItemStackCodec.encodeIdentity(now.sample(), world.registryAccess())));
-        }
-        for (Map.Entry<String, Tally> entry : before.entrySet()) {
-            if (after.containsKey(entry.getKey())) continue;
-            logged = true;
-            Tally old = entry.getValue();
-            mod.database().insertContainerAsync(new DatabaseManager.ContainerLog(
-                    0, time, user, wid,
-                    pos.getX(), pos.getY(), pos.getZ(),
-                    DatabaseManager.CONTAINER_WITHDRAW,
-                    BuiltInRegistries.ITEM.getKey(old.sample().getItem()).toString(), old.count(),
-                    ItemStackCodec.encodeIdentity(old.sample(), world.registryAccess())));
-        }
+        boolean logged = ContainerTracker.logDiff(mod, user, world, wid, pos, before, after, time);
         // the dispenser moved items here: a player watching this container must not be
         // blamed for them when the screen closes
         if (logged) ContainerTracker.rebaseline(world, pos);
+    }
+
+    /**
+     * Drops the baseline of a container that is being removed, so a later observation of that
+     * position establishes a fresh baseline instead of diffing against contents that are gone.
+     */
+    void forget(ServerLevel world, BlockPos pos) {
+        if (world == null || pos == null) return;
+        String wid = world.dimension().identifier().toString();
+        snapshots.remove(key(wid, ContainerTracker.canonicalContainerPos(world, pos)));
     }
 
     /**
@@ -134,30 +132,5 @@ public final class DispenserTracker {
         for (int i = 0; i < entries.size() - target; i++) {
             snapshots.remove(entries.get(i).getKey());
         }
-    }
-
-    /**
-     * Snapshots a dispenser/dropper. Two stacks of the same item count as one entry only when they
-     * carry the same data components, so dispensing an enchanted item stays restorable.
-     */
-    private static Map<String, Tally> snapshot(ServerLevel world, DispenserBlockEntity dispenser) {
-        Map<String, Tally> map = new HashMap<>();
-        HolderLookup.Provider registries = world.registryAccess();
-        for (int i = 0; i < dispenser.getContainerSize(); i++) {
-            ItemStack stack = dispenser.getItem(i);
-            if (stack.isEmpty()) continue;
-            String id = ItemStackCodec.encodeIdentity(stack, registries);
-            if (id == null) {
-                // a stack whose components cannot be encoded is still tracked, just without them
-                id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
-            }
-            Tally tally = map.get(id);
-            if (tally == null) {
-                map.put(id, new Tally(stack.copyWithCount(1), stack.getCount()));
-            } else {
-                map.put(id, new Tally(tally.sample(), tally.count() + stack.getCount()));
-            }
-        }
-        return map;
     }
 }

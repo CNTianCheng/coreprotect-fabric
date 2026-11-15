@@ -27,12 +27,13 @@ public abstract class PistonBlockEntityMixin {
         NaturalBreakCause.set("#piston");
     }
 
+    // RETURN instead of TAIL: the closing injector also runs on an early return of the vanilla
+    // body, so the #piston window can never leak into later block changes on this thread.
     @Inject(method = "tick(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/piston/PistonMovingBlockEntity;)V",
-            at = @At("TAIL"))
+            at = @At("RETURN"))
     private static void coreprotect$pistonEnd(Level world, BlockPos pos, BlockState state, PistonMovingBlockEntity blockEntity,
                                               CallbackInfo ci) {
         NaturalBreakCause.clear("#piston");
         CoreProtectFabric.logPistonMove(world, pos, state, blockEntity);
     }
 }
-

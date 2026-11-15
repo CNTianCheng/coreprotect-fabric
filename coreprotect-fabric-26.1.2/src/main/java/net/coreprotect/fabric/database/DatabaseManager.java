@@ -116,14 +116,22 @@ public final class DatabaseManager {
             "CREATE INDEX IF NOT EXISTS idx_sign_pos ON co_sign(wid_id, x, y, z)",
             "CREATE INDEX IF NOT EXISTS idx_sign_time ON co_sign(time, name_id)",
             "CREATE TABLE IF NOT EXISTS co_entity (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data_id INTEGER, action_id INTEGER)",
+            // the other four position tables have this index; without it every r: lookup and
+            // single-block entity history scanned the whole entity table
+            "CREATE INDEX IF NOT EXISTS idx_entity_pos ON co_entity(wid_id, x, y, z)",
             "CREATE INDEX IF NOT EXISTS idx_entity_time ON co_entity(time, name_id)",
             "CREATE TABLE IF NOT EXISTS co_session (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER NOT NULL, action_id INTEGER)",
             "CREATE INDEX IF NOT EXISTS idx_session_time ON co_session(time, name_id)",
-            "CREATE TABLE IF NOT EXISTS co_command (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, message TEXT NOT NULL)",
+            // co_command/co_chat are the only log tables without a position, but they still need the
+            // world so that a multi-world server can search chat and commands per dimension (L3-21).
+            "CREATE TABLE IF NOT EXISTS co_command (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER, message TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_command_time ON co_command(time, name_id)",
-            "CREATE TABLE IF NOT EXISTS co_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, message TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS co_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, name_id INTEGER NOT NULL, wid_id INTEGER, message TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_chat_time ON co_chat(time, name_id)",
-            "CREATE TABLE IF NOT EXISTS co_user (user TEXT PRIMARY KEY, language TEXT)"
+            // Language preferences are keyed by player name for backwards compatibility, but the uuid
+            // is stored alongside it and mirrored into co_user_uuid so a rename keeps the setting (L4-15).
+            "CREATE TABLE IF NOT EXISTS co_user (user TEXT PRIMARY KEY, language TEXT, uuid TEXT)",
+            "CREATE TABLE IF NOT EXISTS co_user_uuid (uuid TEXT PRIMARY KEY, language TEXT)"
     };
 
     /** Old v2 indexes, dropped while the text columns are replaced by dictionary ids. */
@@ -153,6 +161,25 @@ public final class DatabaseManager {
     /** Overall budget for the per-table counts, so {@code /co status} cannot stall for minutes. */
     private static final long COUNTS_BUDGET_NANOS = 20_000_000_000L;
     private static final int COUNT_QUERY_TIMEOUT_SECONDS = 5;
+
+    /**
+     * Consecutive failed batches before the queued rows are dropped. A batch that always fails
+     * (a poisoned row, a read-only or full disk) used to be retried every second forever, which
+     * filled the queue and lost every new row instead of the batch that actually failed.
+     */
+    private static final int MAX_FLUSH_FAILURES = 6;
+    /** Upper bound of the per-batch retry delay (1 s, 2 s, 4 s, ... capped here). */
+    private static final long MAX_FLUSH_BACKOFF_MS = 30_000L;
+
+    /** How often a failed {@link #open()} is retried in the background (the listeners stay registered). */
+    private static final int OPEN_RETRY_ATTEMPTS = 3;
+    private static final int OPEN_RETRY_SECONDS = 30;
+
+    /** A purge deletes in one transaction; on a large database that may legitimately take minutes. */
+    private static final long PURGE_TIMEOUT_SECONDS = 600;
+
+    /** Pages freed per {@code incremental_vacuum} call: bounds how long the writer thread is blocked. */
+    private static final int INCREMENTAL_VACUUM_PAGES = 2000;
 
     /**
      * The single writer thread. Not final: after a {@link #close()} (a {@code /co reload} that
@@ -190,6 +217,11 @@ public final class DatabaseManager {
 
     private Connection conn;
     private volatile boolean open;
+    /**
+     * Set by {@link #close()}: a background open retry must not resurrect a database whose owner
+     * already shut it down (that would leave a writer thread and a connection running forever).
+     */
+    private volatile boolean closed;
     private Path dbPath;
 
     // ------------------------------------------------------------------
@@ -215,6 +247,12 @@ public final class DatabaseManager {
     private final Map<String, PreparedStatement> statements = new HashMap<>();
     /** Non-zero while the last batch failed: wait this long before retrying instead of spinning. */
     private volatile long flushRetryMs;
+    /** Consecutive failed batches, drives both the retry delay and the give-up decision. */
+    private int flushFailures;
+    /** One-shot flag: b: cannot be applied to sign lookups, so warn once instead of per query. */
+    private volatile boolean signBlockFilterWarned;
+    /** One-shot flag: chat/command/session rows have no position, so r: cannot be applied. */
+    private volatile boolean messageRadiusFilterWarned;
 
     private static ScheduledExecutorService newWriter() {
         return Executors.newSingleThreadScheduledExecutor(r -> {
@@ -275,20 +313,51 @@ public final class DatabaseManager {
         }
         CoreProtectFabric.LOGGER.info("[CoreProtect] Using database file: {}", dbPath);
         ensureExecutors();
+        closed = false;
         try {
             // The one-time v1->v2 migration may take a while on large databases; wait patiently.
-            worker.submit(() -> {
-                Class.forName("org.sqlite.JDBC");
-                conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-                applyPragmas(conn, false);
-                initSchema(conn);
-                open = true;
-                return null;
-            }).get(30, TimeUnit.MINUTES);
+            // The cast keeps the compiler from having to choose between submit(Callable) and submit(Runnable).
+            worker.submit((Callable<Void>) this::openWriter).get(30, TimeUnit.MINUTES);
+        } catch (java.util.concurrent.TimeoutException e) {
+            // the writer thread is still inside the task (a migration of a huge file): retrying
+            // would run a second open on top of it
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Opening the database took longer than 30 minutes; "
+                    + "logging stays disabled until the open finishes.", e);
+            return;
         } catch (Exception e) {
-            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to open the database", e);
+            // The listeners and commands are registered regardless of this failure, so a single log
+            // line used to hide that every log row was being dropped until the next restart.
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to open the database {} - block, container, item, "
+                    + "sign, entity, session, chat and command logging are DISABLED until an open succeeds. Check the "
+                    + "path, the file permissions and the free disk space. Retrying {} time(s) in the background.",
+                    dbPath, OPEN_RETRY_ATTEMPTS, e);
+            scheduleOpenRetry(OPEN_RETRY_ATTEMPTS);
             return;
         }
+        afterOpen();
+    }
+
+    /** Opens the writer connection and initializes the schema. Runs on the writer thread. */
+    private Void openWriter() throws Exception {
+        Class.forName("org.sqlite.JDBC");
+        Connection fresh = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+        try {
+            applyPragmas(fresh, false);
+            initSchema(fresh);
+        } catch (Exception e) {
+            try {
+                fresh.close();
+            } catch (SQLException ignored) {
+            }
+            throw e;
+        }
+        conn = fresh;
+        open = true;
+        return null;
+    }
+
+    /** Post-open work: retention/compaction, the queue left over from a previous run, maintenance. */
+    private void afterOpen() {
         if (legacyMigrated) {
             // rebuild the file in the background so the dropped text columns actually free disk space
             vacuumAsync();
@@ -298,6 +367,27 @@ public final class DatabaseManager {
         }
         scheduleCheckpoints();
         scheduleBackups();
+    }
+
+    /** Retries a failed {@link #open()} on the writer thread instead of staying dead until a restart. */
+    private void scheduleOpenRetry(int attemptsLeft) {
+        if (attemptsLeft <= 0 || closed) return;
+        try {
+            worker.schedule(() -> {
+                if (open || closed) return;
+                try {
+                    openWriter();
+                    CoreProtectFabric.LOGGER.info("[CoreProtect] Database opened on retry ({}).", dbPath);
+                    afterOpen();
+                } catch (Exception e) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Database open retry failed ({} attempt(s) left): {}",
+                            attemptsLeft - 1, e.toString());
+                    scheduleOpenRetry(attemptsLeft - 1);
+                }
+            }, OPEN_RETRY_SECONDS, TimeUnit.SECONDS);
+        } catch (RejectedExecutionException e) {
+            // the writer thread is shutting down: nothing left to retry on
+        }
     }
 
     /** Schema setup (version check, one-time v1->v2 and v2->v3 migrations, DDL). Runs on the writer connection. */
@@ -326,6 +416,23 @@ public final class DatabaseManager {
             if (!hasColumn(c, "co_item", "nbt")) {
                 st.executeUpdate("ALTER TABLE co_item ADD COLUMN nbt TEXT");
             }
+            // Chat and commands logged before the world column existed cannot be attributed to a
+            // dimension, so the column is nullable and old rows simply do not match a world filter.
+            if (!hasColumn(c, "co_command", "wid_id")) {
+                st.executeUpdate("ALTER TABLE co_command ADD COLUMN wid_id INTEGER");
+            }
+            if (!hasColumn(c, "co_chat", "wid_id")) {
+                st.executeUpdate("ALTER TABLE co_chat ADD COLUMN wid_id INTEGER");
+            }
+            // co_user predates uuid keying; the column lets a rename keep its language setting.
+            if (!hasColumn(c, "co_user", "uuid")) {
+                st.executeUpdate("ALTER TABLE co_user ADD COLUMN uuid TEXT");
+            }
+            // The world indexes are created here rather than in DDL_V3: an existing database only
+            // gets the wid_id column in the ALTER statements above, so CREATE INDEX would fail there.
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_command_world ON co_command(wid_id, time)");
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_chat_world ON co_chat(wid_id, time)");
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_user_uuid ON co_user(uuid)");
             if (version < 3) {
                 st.executeUpdate("PRAGMA user_version=3");
             }
@@ -360,21 +467,58 @@ public final class DatabaseManager {
     }
 
     /**
+     * Writes the pre-migration copy next to the database file (the safety net of both migrations).
+     *
+     * <p>Two problems with the plain {@code Files.copy(dbPath, backup)} this replaces: in WAL mode
+     * the main file alone does not contain the transactions committed after the last checkpoint, and
+     * the copy was only written when no backup existed yet, so an old file from an earlier attempt
+     * was kept forever and looked like a fresh safety net. The copy is now replaced on every attempt
+     * and is written as a consistent snapshot ({@code VACUUM INTO}).
+     */
+    private void copyMigrationBackup(Connection c, Path backup) throws SQLException {
+        try {
+            Files.deleteIfExists(backup);
+        } catch (java.io.IOException e) {
+            throw new SQLException("Failed to replace the migration backup", e);
+        }
+        String target = backup.toAbsolutePath().toString().replace("'", "''");
+        try (Statement st = c.createStatement()) {
+            st.execute("VACUUM INTO '" + target + "'");
+            return;
+        } catch (SQLException e) {
+            // never let a failing snapshot block the open: fall back to the old file copy below
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Could not write the migration backup with VACUUM INTO ({}); "
+                    + "falling back to a plain file copy.", e.toString());
+        }
+        try (Statement st = c.createStatement()) {
+            // fold the WAL into the main file, otherwise the copy misses recent transactions
+            st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        } catch (SQLException e) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] WAL checkpoint before the migration backup failed: {}",
+                    e.toString());
+        }
+        try {
+            Files.copy(dbPath, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.io.IOException e) {
+            throw new SQLException("Failed to create migration backup", e);
+        }
+    }
+
+    /**
      * One-time v1 -> v2 migration: dictionary-encode the state/material text columns,
      * drop them, and mark the schema as v2. A backup copy is kept next to the file.
      */
     private void migrateV1ToV2(Connection c) throws SQLException {
         try {
             Path backup = dbPath.resolveSibling(dbPath.getFileName() + ".bak-v1");
-            if (!Files.exists(backup)) {
-                CoreProtectFabric.LOGGER.info("[CoreProtect] Migrating database to compressed schema; creating backup {} ...",
-                        backup.getFileName());
-                try {
-                    Files.copy(dbPath, backup);
-                } catch (java.io.IOException e) {
-                    throw new SQLException("Failed to create migration backup", e);
-                }
-            }
+            CoreProtectFabric.LOGGER.info("[CoreProtect] Migrating database to compressed schema; creating backup {} ...",
+                    backup.getFileName());
+            copyMigrationBackup(c, backup);
+            // one transaction for the whole migration: a failure in the middle used to leave a
+            // half-migrated file behind, and the next attempt then copied that broken file over
+            // the good backup.
+            boolean autoCommit = c.getAutoCommit();
+            c.setAutoCommit(false);
             try (Statement st = c.createStatement()) {
                 st.executeUpdate("CREATE TABLE IF NOT EXISTS co_state (id INTEGER PRIMARY KEY, state TEXT NOT NULL UNIQUE)");
                 migrateColumn(st, "co_block", "old_data", "old_id");
@@ -407,9 +551,16 @@ public final class DatabaseManager {
                 st.executeUpdate("DROP INDEX IF EXISTS idx_entity_data");
                 st.executeUpdate("PRAGMA user_version=2");
             }
+            c.commit();
+            c.setAutoCommit(autoCommit);
             CoreProtectFabric.LOGGER.info("[CoreProtect] Database schema migrated to v2 (dictionary-compressed).");
             legacyMigrated = true;
         } catch (SQLException e) {
+            try {
+                c.rollback();
+                c.setAutoCommit(true);
+            } catch (SQLException ignored) {
+            }
             CoreProtectFabric.LOGGER.error("[CoreProtect] Database migration failed; restore {} to keep using the old schema.",
                     dbPath.getFileName() + ".bak-v1", e);
             throw e;
@@ -437,23 +588,9 @@ public final class DatabaseManager {
         if (hasColumn(c, "co_block", "name_id")) return; // already converted
         try {
             Path backup = dbPath.resolveSibling(dbPath.getFileName() + ".bak-v2");
-            if (!Files.exists(backup)) {
-                CoreProtectFabric.LOGGER.info("[CoreProtect] Compressing the database (schema v3); creating backup {} ...",
-                        backup.getFileName());
-                try (Statement st = c.createStatement()) {
-                    // fold the WAL into the main file first, otherwise the copy would miss the
-                    // transactions that were committed after the last checkpoint
-                    st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                } catch (SQLException e) {
-                    CoreProtectFabric.LOGGER.warn("[CoreProtect] WAL checkpoint before the migration backup failed: {}",
-                            e.toString());
-                }
-                try {
-                    Files.copy(dbPath, backup);
-                } catch (java.io.IOException e) {
-                    throw new SQLException("Failed to create migration backup", e);
-                }
-            }
+            CoreProtectFabric.LOGGER.info("[CoreProtect] Compressing the database (schema v3); creating backup {} ...",
+                    backup.getFileName());
+            copyMigrationBackup(c, backup);
             boolean autoCommit = c.getAutoCommit();
             c.setAutoCommit(false);
             try (Statement st = c.createStatement()) {
@@ -532,28 +669,59 @@ public final class DatabaseManager {
         st.executeUpdate("ALTER TABLE " + table + " DROP COLUMN " + quote(column));
     }
 
-    /** Removes dictionary rows that no log row references any more (used after a purge/migration). */
+    /**
+     * Removes dictionary rows that no log row references any more (used after a purge/migration).
+     *
+     * <p>The reference lists used to be hard-coded, so the v2 -> v3 migration of an old database
+     * that has no {@code co_session}/{@code co_command}/{@code co_chat} table yet failed with
+     * "no such table" - the v3 DDL only runs after the migration. The lists are now built from the
+     * tables and columns that actually exist.
+     */
     private void gcDictionaries(Statement st) throws SQLException {
-        st.executeUpdate("DELETE FROM co_state WHERE id NOT IN ("
-                + "SELECT old_id FROM co_block WHERE old_id IS NOT NULL "
-                + "UNION SELECT new_id FROM co_block WHERE new_id IS NOT NULL "
-                + "UNION SELECT data_id FROM co_container WHERE data_id IS NOT NULL "
-                + "UNION SELECT data_id FROM co_item WHERE data_id IS NOT NULL "
-                + "UNION SELECT data_id FROM co_entity WHERE data_id IS NOT NULL)");
-        st.executeUpdate("DELETE FROM co_name WHERE id NOT IN ("
-                + "SELECT name_id FROM co_block UNION SELECT name_id FROM co_container "
-                + "UNION SELECT name_id FROM co_item UNION SELECT name_id FROM co_sign "
-                + "UNION SELECT name_id FROM co_entity UNION SELECT name_id FROM co_session "
-                + "UNION SELECT name_id FROM co_command UNION SELECT name_id FROM co_chat)");
-        st.executeUpdate("DELETE FROM co_world WHERE id NOT IN ("
-                + "SELECT wid_id FROM co_block UNION SELECT wid_id FROM co_container "
-                + "UNION SELECT wid_id FROM co_item UNION SELECT wid_id FROM co_sign "
-                + "UNION SELECT wid_id FROM co_entity UNION SELECT wid_id FROM co_session)");
-        st.executeUpdate("DELETE FROM co_action WHERE id NOT IN ("
-                + "SELECT action_id FROM co_block WHERE action_id IS NOT NULL "
-                + "UNION SELECT action_id FROM co_item WHERE action_id IS NOT NULL "
-                + "UNION SELECT action_id FROM co_entity WHERE action_id IS NOT NULL "
-                + "UNION SELECT action_id FROM co_session WHERE action_id IS NOT NULL)");
+        // co_state: every column that stores a state id (old/new block state, container/item/entity data)
+        gcDictionary(st, "co_state", "id", new String[][] {
+                {"co_block", "old_id"}, {"co_block", "new_id"},
+                {"co_container", "data_id"}, {"co_item", "data_id"}, {"co_entity", "data_id"}});
+        // co_name: the user of every log table
+        gcDictionary(st, "co_name", "id", new String[][] {
+                {"co_block", "name_id"}, {"co_container", "name_id"}, {"co_item", "name_id"},
+                {"co_sign", "name_id"}, {"co_entity", "name_id"}, {"co_session", "name_id"},
+                {"co_command", "name_id"}, {"co_chat", "name_id"}});
+        // co_world: only the tables that have a world column at all (chat/command rows carry one
+        // since L3-21, and the rows of a world that is only used there must survive this cleanup)
+        gcDictionary(st, "co_world", "id", new String[][] {
+                {"co_block", "wid_id"}, {"co_container", "wid_id"}, {"co_item", "wid_id"},
+                {"co_sign", "wid_id"}, {"co_entity", "wid_id"}, {"co_session", "wid_id"},
+                {"co_command", "wid_id"}, {"co_chat", "wid_id"}});
+        // co_action: blocks, items, entities and sessions carry one, but it may be NULL
+        gcDictionary(st, "co_action", "id", new String[][] {
+                {"co_block", "action_id"}, {"co_item", "action_id"}, {"co_entity", "action_id"},
+                {"co_session", "action_id"}});
+    }
+
+    /** Deletes the {@code dictTable} rows whose id is not referenced by any of the given columns. */
+    private void gcDictionary(Statement st, String dictTable, String dictColumn, String[][] references)
+            throws SQLException {
+        Connection c = st.getConnection();
+        if (!tableExists(c, dictTable)) return;
+        StringBuilder union = new StringBuilder();
+        for (String[] ref : references) {
+            if (!tableExists(c, ref[0]) || !hasColumn(c, ref[0], ref[1])) continue;
+            if (union.length() > 0) {
+                union.append(" UNION ");
+            }
+            // the table name qualifies the column: the union mixes tables and column names, and a
+            // NULL id is not a reference
+            union.append("SELECT ").append(ref[0]).append('.').append(ref[1])
+                    .append(" FROM ").append(ref[0])
+                    .append(" WHERE ").append(ref[0]).append('.').append(ref[1]).append(" IS NOT NULL");
+        }
+        if (union.length() == 0) {
+            // nothing references this dictionary yet, so "NOT IN ()" (a syntax error) must not be
+            // attempted; keeping the rows is safe, the next log row reuses them
+            return;
+        }
+        st.executeUpdate("DELETE FROM " + dictTable + " WHERE " + dictColumn + " NOT IN (" + union + ")");
     }
 
     private void applyPragmas(Connection c, boolean readOnly) {
@@ -571,10 +739,71 @@ public final class DatabaseManager {
             } else {
                 st.execute("PRAGMA journal_mode=WAL");
                 // full = WAL fsync'd on every commit (max crash safety, default); normal = faster
-                st.execute("PRAGMA synchronous=" + CoreProtectFabric.instance().config().database.syncMode.toUpperCase());
+                st.execute("PRAGMA synchronous=" + syncModePragma());
             }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to apply SQLite pragmas", e);
+        }
+    }
+
+    /**
+     * The configured {@code database.syncMode} as a pragma value. The value is concatenated into a
+     * PRAGMA, so an unknown word made SQLite reject that one statement and silently keep the
+     * previous (default FULL) mode; it has to be validated instead of trusted.
+     */
+    private static String syncModePragma() {
+        CoreProtectFabric mod = CoreProtectFabric.instance();
+        String raw = mod == null ? null : mod.config().database.syncMode;
+        String mode = raw == null ? "" : raw.trim().toUpperCase(java.util.Locale.ROOT);
+        switch (mode) {
+            case "OFF", "NORMAL", "FULL", "EXTRA":
+                return mode;
+            default:
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Unknown database.syncMode \"{}\"; using FULL.", raw);
+                return "FULL";
+        }
+    }
+
+    /**
+     * Applies the configured {@code database.syncMode} to the writer connection without reopening it
+     * (SQLite allows {@code synchronous} to change between transactions). Called after
+     * {@code /co reload}: the reload reloaded the config file, but the connection kept the mode it
+     * was opened with until the next server restart, so changing the setting needed a restart.
+     */
+    public void applySyncMode() {
+        if (!open) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] The database is not open; database.syncMode is applied "
+                    + "when it opens.");
+            return;
+        }
+        try {
+            worker.submit(() -> {
+                if (conn == null) return;
+                try {
+                    if (!conn.getAutoCommit()) {
+                        // the mode cannot change inside a transaction, and the rows of that batch would
+                        // be committed with the old one anyway
+                        CoreProtectFabric.LOGGER.warn("[CoreProtect] Cannot apply database.syncMode while a write "
+                                + "batch is running; it stays unchanged until the next /co reload.");
+                        return;
+                    }
+                    String mode = syncModePragma();
+                    try (Statement st = conn.createStatement()) {
+                        st.execute("PRAGMA synchronous=" + mode);
+                    }
+                    CoreProtectFabric.LOGGER.info("[CoreProtect] Applied database.syncMode={} to the open database.",
+                            mode);
+                } catch (SQLException e) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Failed to apply database.syncMode: {}", e.toString());
+                }
+            }).get(5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            // the writer is busy (purge, VACUUM); the pragma still runs when it gets there
+            CoreProtectFabric.LOGGER.info("[CoreProtect] database.syncMode is applied as soon as the writer is free.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Could not apply database.syncMode: {}", e.toString());
         }
     }
 
@@ -676,51 +905,53 @@ public final class DatabaseManager {
         if (minutes <= 0) return;
         worker.scheduleWithFixedDelay(() -> {
             if (!open) return;
+            Path target = dbPath.resolveSibling(dbPath.getFileName() + ".backup");
+            Path tmp = dbPath.resolveSibling(dbPath.getFileName() + ".backup.tmp");
             try {
-                Path target = dbPath.resolveSibling(dbPath.getFileName() + ".backup");
-                Path tmp = dbPath.resolveSibling(dbPath.getFileName() + ".backup.tmp");
+                // VACUUM INTO blocks the single writer thread for as long as the copy takes and needs
+                // room for a second full copy next to the live file, so refuse to start without it
+                // instead of filling the disk (L1-04).
+                long needed = Files.size(dbPath) * 2;
+                long usable = Files.getFileStore(dbPath).getUsableSpace();
+                if (usable < needed) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Skipping the database backup: {} MB free, {} MB "
+                            + "needed for a full copy next to the database.",
+                            usable / (1024 * 1024), needed / (1024 * 1024));
+                    return;
+                }
                 Files.deleteIfExists(tmp);
                 String sql = "VACUUM INTO '" + tmp.toAbsolutePath().toString().replace("'", "''") + "'";
+                long started = System.nanoTime();
                 try (Statement st = conn.createStatement()) {
                     st.execute(sql);
                 }
+                long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
                 Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                         java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-                CoreProtectFabric.LOGGER.info("[CoreProtect] Database backup written: {} ({} MB).",
-                        target.getFileName(), Files.size(target) / (1024 * 1024));
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Database backup written: {} ({} MB, took {} ms).",
+                        target.getFileName(), Files.size(target) / (1024 * 1024), tookMs);
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.warn("[CoreProtect] Database backup failed: {}", e.toString());
+                try {
+                    // a half written tmp file would keep a full copy of the database on disk
+                    Files.deleteIfExists(tmp);
+                } catch (java.io.IOException ignored) {
+                }
             }
         }, minutes, minutes, TimeUnit.MINUTES);
     }
 
     public void close() {
+        closed = true; // a queued open retry must not reopen what the owner just closed
         if (!open) return;
         open = false; // drop any write that arrives from now on
-        // Flush and close on the writer thread, but never lose the close task to a timed
-        // get(): a backup/purge queued ahead of it used to push it past the 60 s timeout.
-        // The queued batch is drained first, so rows logged just before the shutdown are
-        // still written (they are no longer sitting in the executor queue).
+        // Flush on the writer thread, but never lose the close task to a timed get(): a
+        // backup/purge queued ahead of it used to push it past the 60 s timeout. The queued batch
+        // is drained first, so rows logged just before the shutdown are still written (they are no
+        // longer sitting in the executor queue).
         try {
-            worker.submit(() -> {
-                drainWrites();
-                if (conn != null) {
-                    try (Statement st = conn.createStatement()) {
-                        st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                    } catch (SQLException ignored) {
-                    }
-                    closeStatements();
-                    try {
-                        conn.close();
-                    } catch (SQLException ignored) {
-                    }
-                    conn = null;
-                }
-            }).get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            worker.submit(this::drainWrites).get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
-            // Never touch the connection from this thread: the writer thread may still be inside
-            // it, and closing statements/connection underneath a running task is what produced
-            // "database has been closed" errors. The file lock goes away with the JVM.
             CoreProtectFabric.LOGGER.error("[CoreProtect] Database close task did not finish within {} s; "
                     + "rows may still be queued: {}", CLOSE_TIMEOUT_SECONDS, e.toString());
             // A writer that is stuck inside a failing batch has to be interrupted: shutdown() only
@@ -728,8 +959,9 @@ public final class DatabaseManager {
             worker.shutdownNow();
         }
         worker.shutdown();
+        boolean writerStopped = false;
         try {
-            worker.awaitTermination(5, TimeUnit.SECONDS);
+            writerStopped = worker.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -742,6 +974,25 @@ public final class DatabaseManager {
             Thread.currentThread().interrupt();
         }
         closeReadConnections();
+        // The WAL is folded into the main file only now, after every reader is gone: a read
+        // connection holding a transaction made the checkpoint requested on the writer thread
+        // return SQLITE_BUSY, the result was ignored, and the .db-wal stayed on disk (it was
+        // replayed on the next start, so nothing was lost, but the file never shrank).
+        // Nothing else can touch the connection here: the writer thread either finished its close
+        // task or was interrupted and has terminated.
+        if (writerStopped && conn != null) {
+            closeStatements(); // (the checkpoint needs no open statements either)
+            try (Statement st = conn.createStatement()) {
+                st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+            } catch (SQLException e) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Final WAL checkpoint failed: {}", e.toString());
+            }
+            try {
+                conn.close();
+            } catch (SQLException ignored) {
+            }
+            conn = null;
+        }
     }
 
     /**
@@ -776,6 +1027,9 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_block", e);
+                // A row whose own INSERT throws must be counted: the batch around it still commits,
+                // so without this the row disappeared while /co status reported "0 dropped" (L1-02).
+                countDroppedRow();
             }
         });
     }
@@ -791,6 +1045,7 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_container", e);
+                countDroppedRow();
             }
         });
     }
@@ -806,6 +1061,7 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_item", e);
+                countDroppedRow();
             }
         });
     }
@@ -820,6 +1076,7 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_sign", e);
+                countDroppedRow();
             }
         });
     }
@@ -835,6 +1092,7 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_entity", e);
+                countDroppedRow();
             }
         });
     }
@@ -848,32 +1106,55 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_session", e);
+                countDroppedRow();
             }
         });
     }
 
     public void insertCommandAsync(long time, String user, String message) {
+        // older call sites do not know the dimension; the row then has no world attribution
+        insertCommandAsync(time, user, null, message);
+    }
+
+    /**
+     * Logs a command together with the dimension it was run in.
+     *
+     * @param wid the world folder name, or {@code null} when unknown
+     */
+    public void insertCommandAsync(long time, String user, String wid, String message) {
         trackUser(user);
         submitWrite(() -> {
             try {
-                PreparedStatement ps = prepare("INSERT INTO co_command(time,name_id,message) VALUES(?,?,?)");
-                bind(ps, Arrays.asList(time, nameId(user), message));
+                PreparedStatement ps = prepare("INSERT INTO co_command(time,name_id,wid_id,message) VALUES(?,?,?,?)");
+                bind(ps, Arrays.asList(time, nameId(user), worldId(wid), message));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_command", e);
+                countDroppedRow();
             }
         });
     }
 
     public void insertChatAsync(long time, String user, String message) {
+        // older call sites do not know the dimension; the row then has no world attribution
+        insertChatAsync(time, user, null, message);
+    }
+
+    /**
+     * Logs a chat line together with the dimension it was sent in.
+     *
+     * @param wid the world folder name, or {@code null} when unknown
+     */
+    public void insertChatAsync(long time, String user, String wid, String message) {
         trackUser(user);
         submitWrite(() -> {
             try {
-                PreparedStatement ps = prepare("INSERT INTO co_chat(time,name_id,message) VALUES(?,?,?)");
-                bind(ps, Arrays.asList(time, nameId(user), message));
+                PreparedStatement ps = prepare("INSERT INTO co_chat(time,name_id,wid_id,message) VALUES(?,?,?,?)");
+                bind(ps, Arrays.asList(time, nameId(user), worldId(wid), message));
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: co_chat", e);
+                countDroppedRow();
             }
         });
     }
@@ -929,8 +1210,28 @@ public final class DatabaseManager {
     }
 
     public void saveUserLanguageAsync(String user, String language) {
-        enqueue("INSERT INTO co_user(user,language) VALUES(?,?) ON CONFLICT(user) DO UPDATE SET language=excluded.language",
-                Arrays.asList(user, language));
+        // legacy call site: without a uuid only the name-keyed row can be written
+        saveUserLanguageAsync(user, null, language);
+    }
+
+    /**
+     * Stores a language preference keyed by name and, when known, by uuid. The uuid row survives a
+     * rename and is not inherited by a different player who happens to use the same name.
+     *
+     * @param user     the player name
+     * @param uuid     the player uuid as a string, or {@code null} when unknown
+     * @param language the language code to store
+     */
+    public void saveUserLanguageAsync(String user, String uuid, String language) {
+        enqueue("INSERT INTO co_user(user,language,uuid) VALUES(?,?,?) "
+                        + "ON CONFLICT(user) DO UPDATE SET language=excluded.language, "
+                        + "uuid=COALESCE(excluded.uuid, co_user.uuid)",
+                Arrays.asList(user, language, uuid));
+        if (uuid != null && !uuid.isEmpty()) {
+            enqueue("INSERT INTO co_user_uuid(uuid,language) VALUES(?,?) "
+                            + "ON CONFLICT(uuid) DO UPDATE SET language=excluded.language",
+                    Arrays.asList(uuid, language));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -944,6 +1245,12 @@ public final class DatabaseManager {
                     + "LEFT JOIN co_action a ON a.id=b.action_id ";
 
     public List<BlockLog> queryBlocks(Criteria c, long limit, long offset) {
+        // a:container / a:item / a:sign / a:kill must not return block rows either: appendBlockAction()
+        // only filters the block type, so without this gate every block of the window was listed next
+        // to the rows the action actually asked for (L2-10 / L4-03).
+        if (!blockActionSelects(c.action)) {
+            return new ArrayList<>();
+        }
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(BLOCK_SELECT + "WHERE 1=1");
             List<Object> params = new ArrayList<>();
@@ -988,6 +1295,11 @@ public final class DatabaseManager {
     }
 
     public List<ContainerLog> queryContainers(Criteria c, long limit, long offset) {
+        // a:<action> has to be honoured here too: this query used to return container rows for every
+        // action, so /co lookup a:#tnt also listed every chest access of the window (L2-10 / L4-03).
+        if (actionNamesOtherTable(c.action, "container")) {
+            return new ArrayList<>();
+        }
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
                     "SELECT c.id,c.time,n.name,w.wid,c.x,c.y,c.z,c.type,s.state,c.amount,c.nbt "
@@ -995,6 +1307,9 @@ public final class DatabaseManager {
                             + "LEFT JOIN co_name n ON n.id=c.name_id LEFT JOIN co_world w ON w.id=c.wid_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
+            // b:<item> was ignored here (L4-14): the accessed item is the joined co_state row
+            appendDataFilter(sql, params, c.block, "s.state");
+            appendDataExcludeFilter(sql, params, c.exclude, "s.state");
             sql.append(" ORDER BY c.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
             params.add(offset);
@@ -1036,6 +1351,9 @@ public final class DatabaseManager {
     }
 
     public List<ItemLog> queryItems(Criteria c, long limit, long offset) {
+        if (actionNamesOtherTable(c.action, "item")) {
+            return new ArrayList<>();
+        }
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
                     "SELECT i.id,i.time,n.name,w.wid,i.x,i.y,i.z,ac.action,s.state,i.amount,i.nbt "
@@ -1044,6 +1362,9 @@ public final class DatabaseManager {
                             + "LEFT JOIN co_action ac ON ac.id=i.action_id WHERE 1=1");
             List<Object> params = new ArrayList<>();
             appendCommonFilters(sql, params, c);
+            // b:<item> was ignored here (L4-14): the dropped/picked up item is the joined co_state row
+            appendDataFilter(sql, params, c.block, "s.state");
+            appendDataExcludeFilter(sql, params, c.exclude, "s.state");
             // '+item' = pickups, '-item' = drops; plain 'item' shows both
             if ("+item".equals(c.action)) {
                 sql.append(" AND i.action_id = (SELECT id FROM co_action WHERE action = '+')");
@@ -1069,6 +1390,18 @@ public final class DatabaseManager {
     }
 
     public List<SignLog> querySigns(Criteria c, long limit, long offset) {
+        if (actionNamesOtherTable(c.action, "sign")) {
+            return new ArrayList<>();
+        }
+        if (c.block != null && !c.block.isEmpty()) {
+            // co_sign only stores the sign text: there is no material to match b:<block> against, so
+            // say so once instead of quietly returning every sign in the window (L4-14).
+            if (!signBlockFilterWarned) {
+                signBlockFilterWarned = true;
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] b:<block> cannot be applied to sign lookups "
+                        + "(a sign has no material) and is ignored.");
+            }
+        }
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
                     "SELECT g.id,g.time,n.name,w.wid,g.x,g.y,g.z,g.data FROM co_sign g "
@@ -1115,6 +1448,9 @@ public final class DatabaseManager {
     }
 
     public List<EntityLog> queryEntities(Criteria c, long limit, long offset) {
+        if (actionNamesOtherTable(c.action, "kill", "death")) {
+            return new ArrayList<>();
+        }
         return executeRead(() -> {
             StringBuilder sql = new StringBuilder(
                     "SELECT e.id,e.time,n.name,w.wid,e.x,e.y,e.z,s.state,ac.action "
@@ -1124,6 +1460,9 @@ public final class DatabaseManager {
             List<Object> params = new ArrayList<>();
             // reuse the common filters so a:#kill also honours r:/t:/u:/e:
             appendCommonFilters(sql, params, c);
+            // b:<entity> was ignored here (L4-14): the entity type is the joined co_state row
+            appendDataFilter(sql, params, c.block, "s.state");
+            appendDataExcludeFilter(sql, params, c.exclude, "s.state");
             // '#kill' only shows kills, '#death' only deaths; the plain '#kill' alias used to mix both
             // (co_entity has no "action" column - the action name lives in the joined co_action)
             if ("#kill".equals(c.action) || "kill".equals(c.action) || "#kills".equals(c.action)) {
@@ -1151,18 +1490,26 @@ public final class DatabaseManager {
     }
 
     public List<MessageLog> querySessions(Criteria c, long limit, long offset) {
-        return queryMessages("co_session", c, limit, offset, true);
+        return queryMessages("co_session", c, limit, offset, true, true);
     }
 
     public List<MessageLog> queryCommands(Criteria c, long limit, long offset) {
-        return queryMessages("co_command", c, limit, offset, false);
+        return queryMessages("co_command", c, limit, offset, false, true);
     }
 
     public List<MessageLog> queryChat(Criteria c, long limit, long offset) {
-        return queryMessages("co_chat", c, limit, offset, false);
+        return queryMessages("co_chat", c, limit, offset, false, true);
     }
 
-    private List<MessageLog> queryMessages(String table, Criteria c, long limit, long offset, boolean hasAction) {
+    private List<MessageLog> queryMessages(String table, Criteria c, long limit, long offset, boolean hasAction,
+                                           boolean hasWorld) {
+        if (c.radius > 0 && !messageRadiusFilterWarned) {
+            // chat, command and session rows have no position: r: cannot be honored, so say it once
+            // instead of silently returning the whole history (L4-14)
+            messageRadiusFilterWarned = true;
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Radius lookups are not supported for chat, command and "
+                    + "session rows; the radius of this query is ignored.");
+        }
         return executeRead(() -> {
             // co_session stores wid instead of a message column; alias it so both shapes map to MessageLog.message
             StringBuilder sql = new StringBuilder("SELECT t.id,t.time,n.name,");
@@ -1188,6 +1535,16 @@ public final class DatabaseManager {
                 sql.append(" AND ac.action = '+'");
             } else if (hasAction && "-session".equals(c.action)) {
                 sql.append(" AND ac.action = '-'");
+            }
+            if (hasWorld && c.world != null && !c.world.isEmpty()) {
+                // co_command/co_chat only gained wid_id in this schema revision; old rows do not match
+                sql.append(" AND t.wid_id = (SELECT id FROM co_world WHERE wid = ?)");
+                params.add(c.world);
+            }
+            if (c.exclude != null && !c.exclude.isEmpty()) {
+                // messages carry no block name, so e: keeps its user meaning here (L4-14)
+                sql.append(" AND t.name_id NOT IN (SELECT id FROM co_name WHERE name = ? COLLATE NOCASE)");
+                params.add(c.exclude);
             }
             sql.append(" ORDER BY t.id DESC LIMIT ? OFFSET ?");
             params.add(limit);
@@ -1216,17 +1573,24 @@ public final class DatabaseManager {
 
     /** Runs all eight table counts in parallel on the read pool. A failed table reports {@code -1}. */
     public long[] counts() {
-        if (Boolean.TRUE.equals(poolReader.get())) {
-            return countsSequential(); // already on a read worker: never submit to our own pool
+        if (Boolean.TRUE.equals(poolReader.get()) || readPool.isShutdown()) {
+            // Already on a read worker (submitting to our own pool can exhaust it), or the pool is
+            // gone: count on this thread instead of throwing RejectedExecutionException (L1-09).
+            return countsSequential();
         }
         List<Future<Long>> futures = new ArrayList<>();
         for (String table : COUNT_TABLES) {
-            futures.add(readPool.submit(withPoolMarker(() -> {
-                try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + table);
-                     ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? rs.getLong(1) : 0L;
-                }
-            })));
+            try {
+                futures.add(readPool.submit(withPoolMarker(() -> {
+                    try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + table);
+                         ResultSet rs = ps.executeQuery()) {
+                        return rs.next() ? rs.getLong(1) : 0L;
+                    }
+                })));
+            } catch (RejectedExecutionException e) {
+                // the pool was shut down between the check above and the submit
+                futures.add(CompletableFuture.completedFuture(-1L));
+            }
         }
         long[] out = new long[COUNT_TABLES.length];
         // One shared budget instead of 30 s per table: eight hanging queries used to keep the
@@ -1260,10 +1624,34 @@ public final class DatabaseManager {
      */
     public long[] countsSequential() {
         long[] out = new long[COUNT_TABLES.length];
+        // The same shared budget the parallel version uses: eight COUNT(*) over a large co_block can
+        // take minutes on a cold cache, and /co status calls this on the command thread (L1-08/4-09).
+        long deadline = System.nanoTime() + COUNTS_BUDGET_NANOS;
+        boolean budgetWarned = false;
         for (int i = 0; i < COUNT_TABLES.length; i++) {
-            try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + COUNT_TABLES[i]);
-                 ResultSet rs = ps.executeQuery()) {
-                out[i] = rs.next() ? rs.getLong(1) : 0L;
+            if (System.nanoTime() - deadline > 0) {
+                if (!budgetWarned) {
+                    budgetWarned = true;
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Counting the log tables took longer than {} s; "
+                            + "the remaining tables are reported as unknown.",
+                            COUNTS_BUDGET_NANOS / 1_000_000_000L);
+                }
+                for (int j = i; j < COUNT_TABLES.length; j++) {
+                    out[j] = -1L;
+                }
+                break;
+            }
+            try (PreparedStatement ps = readConnection().prepareStatement("SELECT COUNT(*) FROM " + COUNT_TABLES[i])) {
+                // A single query needs its own bound: there is no cancel(true) on this path, so a
+                // timeout is the only way out of a statement that hangs on a locked file.
+                try {
+                    ps.setQueryTimeout(COUNT_QUERY_TIMEOUT_SECONDS);
+                } catch (SQLException ignored) {
+                    // driver without timeout support: the budget check above still applies
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    out[i] = rs.next() ? rs.getLong(1) : 0L;
+                }
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.warn("[CoreProtect] Count of {} failed: {}", COUNT_TABLES[i], e.toString());
                 out[i] = -1L;
@@ -1304,14 +1692,41 @@ public final class DatabaseManager {
      *         must report the failure instead of announcing "0 rows deleted".
      */
     public Long purge(long before) {
-        return execute(() -> doPurge(before));
+        return purge(criteriaWithTimeBefore(before));
+    }
+
+    /**
+     * Deletes the rows matching a whole criteria: everything older than {@code c.time} (exclusive)
+     * plus the u:/e:/r:/world filters and, when the action selects the block table, the b: filter.
+     * Runs in one transaction on the writer thread, so a failed or interrupted purge leaves the
+     * database unchanged instead of half deleted, and a query cannot observe the eight tables
+     * disagreeing with each other.
+     *
+     * @return the number of deleted rows, or {@code null} when the criteria carry no cutoff or the
+     *         purge failed
+     */
+    public Long purge(Criteria c) {
+        if (c == null || c.time <= 0) {
+            // no cutoff means "delete everything older than 0" = wipe the database; the command
+            // rejects /co purge without t:, and a silent wipe must never be the fallback
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Refusing to purge without a time cutoff.");
+            return null;
+        }
+        return execute(() -> doPurge(c), PURGE_TIMEOUT_SECONDS);
+    }
+
+    /** The criteria shape used by the "older than X" purge: a cutoff and nothing else. */
+    private static Criteria criteriaWithTimeBefore(long before) {
+        Criteria c = new Criteria();
+        c.time = before;
+        return c;
     }
 
     /** Fire-and-forget purge used by the data-retention startup limit; logs the row count. */
     public void purgeAsync(long before, int maxDays) {
         worker.submit(() -> {
             try {
-                long rows = doPurge(before);
+                long rows = doPurge(criteriaWithTimeBefore(before));
                 CoreProtectFabric.LOGGER.info("[CoreProtect] Data retention: deleted {} row(s) older than {} day(s).",
                         rows, maxDays);
                 incrementalVacuum();
@@ -1321,22 +1736,101 @@ public final class DatabaseManager {
         });
     }
 
-    private long doPurge(long before) throws SQLException {
-        long total = 0;
-        for (String t : COUNT_TABLES) {
-            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + t + " WHERE time < ?")) {
-                ps.setLong(1, before);
-                total += ps.executeUpdate();
+    private long doPurge(Criteria criteria) throws SQLException {
+        boolean autoCommit = conn.getAutoCommit();
+        // One transaction for all eight tables: the rows were auto-committed one table at a time, so
+        // a failure halfway through left a database where block rows were gone but container rows
+        // were not (L1-03).
+        conn.setAutoCommit(false);
+        try {
+            long total = 0;
+            for (String table : COUNT_TABLES) {
+                total += deleteTable(conn, table, criteria);
+            }
+            conn.commit();
+            // drop dictionary rows that the deleted log rows were the last users of
+            try (Statement st = conn.createStatement()) {
+                gcDictionaries(st);
+            }
+            // ... and drop the id caches too: they still map strings to ids that were just deleted,
+            // so the next log row would reuse a dictionary id that no longer exists.
+            invalidateDictionaries();
+            return total;
+        } catch (SQLException e) {
+            try {
+                conn.rollback();
+            } catch (SQLException rollbackError) {
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Purge rollback failed", rollbackError);
+            }
+            throw e;
+        } finally {
+            try {
+                conn.setAutoCommit(true);
+            } catch (SQLException e) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Could not re-enable auto-commit after the purge: {}",
+                        e.toString());
             }
         }
-        // drop dictionary rows that the deleted log rows were the last users of
-        try (Statement st = conn.createStatement()) {
-            gcDictionaries(st);
+    }
+
+    /**
+     * Deletes the rows of one table. co_block is the only table with the two state columns and the
+     * action id, so its filters are applied through a sub-select on its own id; the other tables
+     * only know time, player and position.
+     */
+    private long deleteTable(Connection c, String table, Criteria criteria) throws SQLException {
+        Criteria filters = purgeFilters(criteria, table);
+        StringBuilder sql = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        if ("co_block".equals(table) && isBlockAction(criteria.action)) {
+            sql.append("DELETE FROM co_block WHERE id IN (SELECT b.id FROM co_block b ")
+                    .append("LEFT JOIN co_state so ON so.id=b.old_id LEFT JOIN co_state sn ON sn.id=b.new_id ")
+                    .append("LEFT JOIN co_action a ON a.id=b.action_id WHERE b.time < ?");
+            params.add(criteria.time);
+            // appendBlockFilters() also adds the u:/e:/r:/world filters of the common set
+            appendBlockFilters(sql, params, filters);
+            appendBlockAction(sql, params, criteria.action);
+            sql.append(")");
+        } else {
+            sql.append("DELETE FROM ").append(table).append(" WHERE time < ?");
+            params.add(criteria.time);
+            appendCommonFilters(sql, params, filters);
         }
-        // ... and drop the id caches too: they still map strings to ids that were just deleted,
-        // so the next log row would reuse a dictionary id that no longer exists.
-        invalidateDictionaries();
-        return total;
+        try (PreparedStatement ps = c.prepareStatement(sql.toString())) {
+            bind(ps, params);
+            return ps.executeUpdate();
+        }
+    }
+
+    /** The filters a purge applies to one table; the cutoff itself is passed as {@code time < ?}. */
+    private static Criteria purgeFilters(Criteria c, String table) {
+        Criteria filters = new Criteria();
+        filters.user = c.user;
+        filters.exclude = c.exclude;
+        filters.block = c.block;
+        filters.action = c.action;
+        filters.time = 0; // keep appendCommonFilters() from adding a second, lower bound
+        if (hasPositionColumns(table)) {
+            filters.radius = c.radius;
+            filters.center = c.center;
+            filters.world = c.world;
+        }
+        return filters;
+    }
+
+    /** True for the tables that store x/y/z, without which r:/world filters cannot be applied. */
+    private static boolean hasPositionColumns(String table) {
+        return switch (table) {
+            case "co_block", "co_container", "co_item", "co_sign", "co_entity" -> true;
+            default -> false;
+        };
+    }
+
+    /** True when a: selects block rows ({@code block}, {@code +block}, {@code -block}, {@code #tnt}). */
+    private static boolean isBlockAction(String action) {
+        if (action == null || action.isEmpty()) return true;
+        String lower = action.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("block") || lower.startsWith("#");
     }
 
     /** Drops every dictionary id cache (after a purge, or after a batch was rolled back). */
@@ -1353,7 +1847,9 @@ public final class DatabaseManager {
         // so the writer's statement cache is dropped first (it fills up again on demand).
         closeStatements();
         try (Statement st = conn.createStatement()) {
-            st.execute("PRAGMA incremental_vacuum");
+            // Bounded on purpose: an unbounded incremental_vacuum frees every page in one go and holds
+            // the only writer thread while all logged rows pile up in the queue (L1-04).
+            st.execute("PRAGMA incremental_vacuum(" + INCREMENTAL_VACUUM_PAGES + ")");
         } catch (SQLException e) {
             CoreProtectFabric.LOGGER.warn("[CoreProtect] Incremental vacuum failed: {}", e.toString());
         }
@@ -1364,6 +1860,15 @@ public final class DatabaseManager {
         worker.submit(() -> {
             try {
                 long before = Files.size(dbPath);
+                // VACUUM rewrites the file and needs room for a second copy while the old one still
+                // exists, so check the disk before starting a procedure that cannot be cancelled (L1-04).
+                long usable = Files.getFileStore(dbPath).getUsableSpace();
+                if (usable < before * 2) {
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Skipping the database compaction: {} MB free, "
+                            + "{} MB needed to rebuild the file.", usable / (1024 * 1024), before * 2 / (1024 * 1024));
+                    return;
+                }
+                long started = System.nanoTime();
                 closeStatements();
                 try (Statement st = conn.createStatement()) {
                     st.execute("PRAGMA auto_vacuum=INCREMENTAL");
@@ -1371,11 +1876,12 @@ public final class DatabaseManager {
                     // in WAL mode the rebuilt pages live in the WAL; checkpoint first so the
                     // main file can actually be truncated by incremental_vacuum below
                     st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                    st.execute("PRAGMA incremental_vacuum");
+                    st.execute("PRAGMA incremental_vacuum(" + INCREMENTAL_VACUUM_PAGES + ")");
                 }
                 long after = Files.size(dbPath);
-                CoreProtectFabric.LOGGER.info("[CoreProtect] Database compacted: {} MB -> {} MB (freed {} MB).",
-                        before / (1024 * 1024), after / (1024 * 1024), (before - after) / (1024 * 1024));
+                CoreProtectFabric.LOGGER.info("[CoreProtect] Database compacted: {} MB -> {} MB (freed {} MB, took {} ms).",
+                        before / (1024 * 1024), after / (1024 * 1024), (before - after) / (1024 * 1024),
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.warn("[CoreProtect] Database compaction failed: {}", e.toString());
             }
@@ -1386,6 +1892,33 @@ public final class DatabaseManager {
         return executeRead(() -> {
             try (PreparedStatement ps = readConnection().prepareStatement("SELECT language FROM co_user WHERE user=?")) {
                 ps.setString(1, user);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getString(1) : null;
+                }
+            }
+        });
+    }
+
+    /**
+     * Reads the language preference by uuid, which keeps working after a player renames.
+     *
+     * @param uuid the player uuid as stored by {@link #saveUserLanguageAsync(String, String, String)}
+     * @return the stored language code, or {@code null} when this uuid never saved one
+     */
+    public String userLanguageByUuid(String uuid) {
+        if (uuid == null || uuid.isEmpty()) return null;
+        return executeRead(() -> {
+            try (PreparedStatement ps = readConnection().prepareStatement(
+                    "SELECT language FROM co_user_uuid WHERE uuid=?")) {
+                ps.setString(1, uuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getString(1);
+                }
+            }
+            // fall back to the name-keyed table for databases written before the uuid table existed
+            try (PreparedStatement ps = readConnection().prepareStatement(
+                    "SELECT language FROM co_user WHERE uuid=?")) {
+                ps.setString(1, uuid);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? rs.getString(1) : null;
                 }
@@ -1447,8 +1980,10 @@ public final class DatabaseManager {
         appendCommonFilters(sql, params, c);
         if (c.block != null && !c.block.isEmpty()) {
             // resolved state strings come from the joined dictionary columns
-            sql.append(" AND (so.state LIKE ? OR sn.state LIKE ?)");
-            String like = "%" + c.block.toLowerCase() + "%";
+            // ESCAPE: the pattern is user input, and an unescaped '_' matched any character
+            // ("b:_" matched every block) while '%' matched everything (L1-12)
+            sql.append(" AND (so.state LIKE ? ESCAPE '\\' OR sn.state LIKE ? ESCAPE '\\')");
+            String like = "%" + likeEscape(c.block.toLowerCase()) + "%";
             params.add(like);
             params.add(like);
         }
@@ -1456,14 +1991,85 @@ public final class DatabaseManager {
             // e: also excludes a matching action/cause (#tnt, #fire, ...) or block type
             // (e:stone); previously it was compared against the user column only, so a
             // block exclusion silently filtered nothing
-            String like = "%" + c.exclude.toLowerCase() + "%";
-            sql.append(" AND (a.action IS NULL OR a.action NOT LIKE ?)")
-                    .append(" AND (so.state IS NULL OR so.state NOT LIKE ?)")
-                    .append(" AND (sn.state IS NULL OR sn.state NOT LIKE ?)");
+            String like = "%" + likeEscape(c.exclude.toLowerCase()) + "%";
+            sql.append(" AND (a.action IS NULL OR a.action NOT LIKE ? ESCAPE '\\')")
+                    .append(" AND (so.state IS NULL OR so.state NOT LIKE ? ESCAPE '\\')")
+                    .append(" AND (sn.state IS NULL OR sn.state NOT LIKE ? ESCAPE '\\')");
             params.add(like); // was the raw value: "e:fire" never matched the action "#fire"
             params.add(like);
             params.add(like);
         }
+    }
+
+    /**
+     * Escapes the LIKE wildcards of a user-supplied value so it is matched literally. Callers must
+     * append {@code ESCAPE '\'} to the pattern, otherwise SQLite keeps treating the backslash as an
+     * ordinary character (L1-12: {@code b:_} matched every block and {@code e:%} every row).
+     */
+    private static String likeEscape(String raw) {
+        if (raw == null) return "";
+        StringBuilder out = new StringBuilder(raw.length() + 8);
+        for (int i = 0; i < raw.length(); i++) {
+            char ch = raw.charAt(i);
+            if (ch == '\\' || ch == '%' || ch == '_') {
+                out.append('\\');
+            }
+            out.append(ch);
+        }
+        return out.toString();
+    }
+
+    /**
+     * True when {@code a:<action>} can be answered by this table. The lookup queries used to ignore
+     * the action completely, so {@code a:container} also returned blocks and {@code a:#tnt} also
+     * returned every chest access (L2-10 / L4-03). A null/empty action selects everything.
+     */
+    private static boolean actionSelects(String action, String... aliases) {
+        if (action == null || action.isEmpty()) return true;
+        String lower = action.toLowerCase(java.util.Locale.ROOT);
+        for (String alias : aliases) {
+            if (lower.contains(alias)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * True when {@code a:} selects block rows: no action, {@code block}/{@code +block}/{@code -block}
+     * or a {@code #<cause>} query ({@code #tnt}, {@code #kill}, ...).
+     */
+    private static boolean blockActionSelects(String action) {
+        if (action == null || action.isEmpty()) return true;
+        if (action.startsWith("#")) return true; // #tnt / #fire are block causes, #kill/#death entities
+        return actionSelects(action, "block");
+    }
+
+    /**
+     * True when {@code a:} explicitly names a different table, so this one must stay empty.
+     * {@code block}/#cause and no action at all do not narrow the other tables: {@code /co rollback}
+     * queries block, container, sign, item and entity rows with the parser's default action "block"
+     * and has to keep rolling all of them back.
+     */
+    private static boolean actionNamesOtherTable(String action, String... aliases) {
+        if (action == null || action.isEmpty()) return false;
+        if (actionSelects(action, aliases)) return false;
+        return !blockActionSelects(action);
+    }
+
+    /** {@code b:<value>} for the tables whose item/entity type is the joined co_state row (L4-14). */
+    private void appendDataFilter(StringBuilder sql, List<Object> params, String value, String column) {
+        if (value == null || value.isEmpty()) return;
+        sql.append(" AND ").append(column).append(" LIKE ? ESCAPE '\\'");
+        params.add("%" + likeEscape(value.toLowerCase()) + "%");
+    }
+
+    /**
+     * {@code e:<value>} for the same tables: co_block excludes a matching item/entity name as well as
+     * a user, so the joined data row has to be excluded here too (L4-14). A null data id stays.
+     */
+    private void appendDataExcludeFilter(StringBuilder sql, List<Object> params, String value, String column) {
+        if (value == null || value.isEmpty()) return;
+        sql.append(" AND (").append(column).append(" IS NULL OR ").append(column).append(" NOT LIKE ? ESCAPE '\\')");
+        params.add("%" + likeEscape(value.toLowerCase()) + "%");
     }
 
     private void appendBlockAction(StringBuilder sql, List<Object> params, String action) {
@@ -1483,8 +2089,21 @@ public final class DatabaseManager {
 
     /** Synchronous task on the writer thread (init, purge). */
     private <T> T execute(Callable<T> task) {
+        return execute(task, 60);
+    }
+
+    /**
+     * Synchronous task on the writer thread with an explicit timeout. A timed-out task keeps
+     * running on the writer, so the caller gets {@code null} and must not report "nothing was
+     * deleted" as if the work had been aborted.
+     */
+    private <T> T execute(Callable<T> task, long timeoutSeconds) {
         try {
-            return worker.submit(task).get(60, TimeUnit.SECONDS);
+            return worker.submit(task).get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Database operation still running after {} s; "
+                    + "the result is unknown.", timeoutSeconds);
+            return null;
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Database operation failed", e);
             return null;
@@ -1518,6 +2137,10 @@ public final class DatabaseManager {
                 return task.call();
             } finally {
                 poolReader.remove();
+                // A timed-out query is cancelled with cancel(true), whose interrupt may still be
+                // pending when the worker thread picks up the next query; sqlite-jdbc checks the
+                // interrupt flag and would abort that unrelated read (L1-16). Clear it here.
+                Thread.interrupted();
             }
         };
     }
@@ -1603,6 +2226,7 @@ public final class DatabaseManager {
                 ps.executeUpdate();
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Database write failed: " + sql, e);
+                countDroppedRow();
             }
         });
     }
@@ -1628,11 +2252,34 @@ public final class DatabaseManager {
 
     /** Counts one dropped log row and warns about it (rate limited to once per 1000 rows). */
     private void countDropped() {
-        long dropped = droppedWrites.incrementAndGet();
-        if (dropped == 1 || dropped % 1000 == 0) {
+        countDropped(1L);
+    }
+
+    /**
+     * Counts dropped log rows. The warning is rate limited to the first row and to every full 1000,
+     * so a burst of drops cannot flood the log.
+     */
+    private void countDropped(long rows) {
+        if (rows <= 0) return;
+        long dropped = droppedWrites.addAndGet(rows);
+        long before = dropped - rows;
+        if (dropped == rows || dropped / 1000 != before / 1000) {
             CoreProtectFabric.LOGGER.warn("[CoreProtect] {} log row(s) dropped so far - the database could not "
                     + "take them. Consider database.syncMode=normal.", dropped);
         }
+    }
+
+    /**
+     * Counts one log row that will never reach the database (its own INSERT failed). Uses the same
+     * counter that {@code /co status} prints, so a row-level failure is no longer invisible (L1-02).
+     */
+    public void countDroppedRow() {
+        countDropped(1L);
+    }
+
+    /** Total number of log rows dropped since startup - the value {@code /co status} reports. */
+    public long droppedRows() {
+        return droppedWrites.get();
     }
 
     private int batchIntervalMs() {
@@ -1666,9 +2313,18 @@ public final class DatabaseManager {
      * of one per row. Runs on the writer thread only.
      */
     private void flushWrites() {
-        if (conn == null) return;
+        if (conn == null) {
+            // No writer connection (open failed or is being reopened): keep the rows and retry
+            // instead of polling the queue forever without a connection.
+            if (open && !writeQueue.isEmpty()) {
+                flushRetryMs = Math.max(flushRetryMs, 1000L);
+                scheduleFlush(flushRetryMs);
+            }
+            return;
+        }
         int rows = 0;
         boolean transaction = false;
+        boolean restartWriter = false;
         List<Runnable> pending = null;
         try {
             int max = batchMaxRows();
@@ -1689,39 +2345,113 @@ public final class DatabaseManager {
             if (transaction) {
                 conn.commit();
                 committedBatches.incrementAndGet();
+                // a batch that went through resets both the delay and the give-up counter
+                flushFailures = 0;
                 flushRetryMs = 0;
             }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.error("[CoreProtect] Batch of {} row(s) failed; they are queued again", rows, e);
             try {
                 conn.rollback();
-            } catch (SQLException ignored) {
-            }
-            // The rows were already taken out of the queue, so a rolled-back batch used to be
-            // lost without a single log line. Put them back (in their original order, behind
-            // whatever arrived meanwhile) so the next flush writes them.
-            if (pending != null) {
-                List<Runnable> retry = new ArrayList<>(pending);
-                writeQueue.drainTo(retry);
-                for (Runnable task : retry) {
-                    if (!writeQueue.offer(task)) {
-                        countDropped();
-                    }
-                }
+            } catch (SQLException rollbackError) {
+                // The transaction is still open. Re-enabling auto-commit in the finally block would
+                // then COMMIT the rows that are about to be queued again, so the same rows would be
+                // written twice (L1-06). Reopening the connection throws the transaction away.
+                restartWriter = true;
+                CoreProtectFabric.LOGGER.error("[CoreProtect] Rollback of the failed batch failed; the writer "
+                        + "connection is reopened so the open transaction cannot be committed.", rollbackError);
             }
             // dictionary ids created inside the rolled-back transaction do not exist any more
             invalidateDictionaries();
-            flushRetryMs = 1000; // do not hammer a disk that just refused a whole batch
+            flushFailures++;
+            if (restartWriter) {
+                reopenWriterConnection();
+                // the failed rows were never committed: queue them so they are written again
+                requeueFailedBatch(pending, false);
+                flushRetryMs = 1000L;
+            } else if (flushFailures >= MAX_FLUSH_FAILURES) {
+                // A batch that fails because of ONE bad row used to be retried every second forever:
+                // the queue filled up and every new row was dropped (L1-07). Give up on this batch,
+                // count it, and let the rows behind it through - a broken disk still fails, but the
+                // rows are then counted instead of being squeezed out silently.
+                int lost = pending == null ? 0 : pending.size();
+                CoreProtectFabric.LOGGER.error("[CoreProtect] The database has been unwritable for {} batch(es) in "
+                        + "a row; {} row(s) of the last batch are dropped so that new rows can be written.",
+                        flushFailures, lost);
+                countDropped(lost);
+                flushFailures = 0;
+                flushRetryMs = 1000L;
+            } else {
+                // The rows were already taken out of the queue, so a rolled-back batch used to be
+                // lost without a single log line. Put them back (in their original order, behind
+                // whatever arrived meanwhile) so the next flush writes them.
+                requeueFailedBatch(pending, true);
+                flushRetryMs = nextFlushBackoff();
+            }
         } finally {
-            if (transaction) {
+            if (transaction && !restartWriter) {
                 try {
                     conn.setAutoCommit(true);
-                } catch (SQLException ignored) {
+                } catch (SQLException e) {
+                    // the batch itself is committed; only the flag is lost and the next batch sets it
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Could not re-enable auto-commit on the writer "
+                            + "connection: {}", e.toString());
                 }
             }
             if (!writeQueue.isEmpty() && open) {
                 scheduleFlush(flushRetryMs); // 0 = keep draining, >0 = back off after a failed batch
             }
+        }
+    }
+
+    /**
+     * Puts the rows of a failed batch back into the queue, in their original order. With
+     * {@code includeQueue} the rows that arrived meanwhile are moved behind them, so a retry never
+     * reorders the log; rows that no longer fit are counted as dropped.
+     */
+    private void requeueFailedBatch(List<Runnable> pending, boolean includeQueue) {
+        if (pending == null || pending.isEmpty()) return;
+        List<Runnable> retry = new ArrayList<>(pending);
+        if (includeQueue) {
+            writeQueue.drainTo(retry);
+        }
+        for (Runnable task : retry) {
+            if (!writeQueue.offer(task)) {
+                countDropped();
+            }
+        }
+    }
+
+    /** 1 s, 2 s, 4 s, ... capped, so a disk that refuses every batch is not hammered once per second. */
+    private long nextFlushBackoff() {
+        int shift = Math.min(Math.max(flushFailures - 1, 0), 5);
+        return Math.min(MAX_FLUSH_BACKOFF_MS, 1000L << shift);
+    }
+
+    /** Reopens the writer connection after a batch left a transaction that could not be rolled back. */
+    private void reopenWriterConnection() {
+        closeStatements();
+        Connection broken = conn;
+        conn = null;
+        if (broken != null) {
+            try {
+                // closing drops the transaction that could not be rolled back
+                broken.close();
+            } catch (SQLException e) {
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Could not close the broken writer connection: {}",
+                        e.toString());
+            }
+        }
+        if (!open || closed) return;
+        try {
+            openWriter();
+            // ids cached before the failed transaction may belong to rolled-back dictionary rows
+            invalidateDictionaries();
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] The writer connection was reopened; the queued rows are "
+                    + "written again.");
+        } catch (Exception e) {
+            CoreProtectFabric.LOGGER.error("[CoreProtect] Failed to reopen the writer connection; the queued rows "
+                    + "stay queued until it succeeds: {}", e.toString());
         }
     }
 
@@ -1749,9 +2479,13 @@ public final class DatabaseManager {
             }
         }
         if (!writeQueue.isEmpty()) {
-            CoreProtectFabric.LOGGER.warn("[CoreProtect] {} row(s) could not be written before the database closed and were dropped.",
-                    writeQueue.size());
+            int lost = writeQueue.size();
             writeQueue.clear();
+            // counted, not just logged: /co status used to report "0 dropped" for the rows that the
+            // shutdown threw away (L1-10)
+            countDropped(lost);
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] {} row(s) could not be written before the database closed and were dropped.",
+                    lost);
         }
     }
 

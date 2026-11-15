@@ -61,10 +61,23 @@ jobs:
 
       # Windows PowerShell reads BOM-less .ps1 files as ANSI, so a Chinese literal inside a
       # script silently turns into mojibake (this once corrupted release bodies on GitHub).
+      # Grep exit codes are handled explicitly (audit L5-13): 0 = matches (fail), 1 = no
+      # match (pass), anything else = grep itself broke (bad regex, unreadable tree), which
+      # must fail too instead of being read as "clean".
       - name: Reject non-ASCII bytes in shell scripts
         run: |
-          if grep -rlP '[^\x00-\x7F]' --include='*.ps1' --include='*.sh' --include='*.bat' . ; then
+          set +e
+          grep -rlP '[^\x00-\x7F]' --include='*.ps1' --include='*.sh' --include='*.bat' . > /tmp/nonascii-scripts.txt 2> /tmp/grep-error.txt
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
             echo "::error::Non-ASCII text found in a script. Keep scripts pure ASCII and read translated strings from UTF-8 data files."
+            cat /tmp/nonascii-scripts.txt
             exit 1
           fi
-          echo "All scripts are ASCII-only."
+          if [ "$status" -ne 1 ]; then
+            echo "::error::grep exited with $status instead of 0/1 - the ASCII gate itself failed, so scripts are NOT verified."
+            cat /tmp/grep-error.txt
+            exit 1
+          fi
+          echo "All scripts are ASCII-only (grep exit 1 = no match)."

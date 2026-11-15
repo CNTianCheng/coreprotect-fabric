@@ -1,19 +1,16 @@
-# Publishes the three GitHub releases for one mod version (Minecraft 1.21 flagship,
-# 1.21.11 and 26.1.2). The mod version is mandatory: tags, asset names and release titles
-# are derived from it, and every derived value is cross-checked against the version that is
-# actually compiled into the jars, so this script can no longer push today's build/libs
-# over a release that belongs to an older version.
+# Historical one-off: it publishes the v1.9.2 assets from <tree>\build\libs, which by now hold
+# a newer build, and its tags/asset names are hard-wired to 1.9.2. Disabled unless a rerun is
+# explicitly requested; new releases go through release.ps1 (audit L5-14).
 #
-#   .build-tools\release-v192.ps1 -Version 1.9.2 [-PreviousTag v1.9.1]
+# The generic version of this script is .build-tools\release.ps1:
 #
-# -PreviousTag is the flagship tag of the superseded release; the per-tree variants
-# (v1.9.1-mc1.21.11, v1.9.1-mc26.1.2) are derived from it. Without it the "previous release
-# now points at this one" step is skipped.
-param(
-    [Parameter(Mandatory = $true)][string]$Version,
-    [string]$PreviousTag = ''
-)
+#   .build-tools\release.ps1 -Version 1.9.4 -PreviousTag v1.9.3
+param([switch]$AllowHistoricalRerun, [string]$Version = '', [string]$PreviousTag = '')
 $ErrorActionPreference = 'Stop'
+if (-not $AllowHistoricalRerun) {
+    throw 'release-v192.ps1 is a historical release script and is disabled; use release.ps1 -Version <version> -PreviousTag <tag> for a new release, or pass -AllowHistoricalRerun to redo this one.'
+}
+if (-not $Version) { throw 'release-v192.ps1 requires -Version (e.g. -Version 1.9.2) even when -AllowHistoricalRerun is given' }
 $root = Split-Path $PSScriptRoot -Parent
 # non-ASCII text lives in UTF-8 data files: Windows PowerShell reads .ps1 files as ANSI
 $supersededText = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'repair\superseded.txt'), [System.Text.Encoding]::UTF8)).TrimEnd("`r", "`n")

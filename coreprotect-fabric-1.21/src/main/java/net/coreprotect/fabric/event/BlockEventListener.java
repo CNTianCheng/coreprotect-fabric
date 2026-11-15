@@ -1,6 +1,7 @@
 package net.coreprotect.fabric.event;
 
 import net.coreprotect.fabric.CoreProtectFabric;
+import net.coreprotect.fabric.container.ContainerTracker;
 import net.coreprotect.fabric.database.DatabaseManager;
 import net.coreprotect.fabric.util.BlockStateUtil;
 import net.coreprotect.fabric.util.TimeUtil;
@@ -37,22 +38,34 @@ public final class BlockEventListener {
             if (player instanceof ServerPlayerEntity sp && mod.inspector().isInspecting(sp)) {
                 return false;
             }
+            // L3-05: a container that is broken loses its contents with the block entity, and by
+            // the time AFTER runs they are gone. BEFORE still sees them. The tracker ignores every
+            // block that is not a container, deduplicates within a tick and never throws.
+            if (world instanceof ServerWorld serverWorld && mod.config().logging.container) {
+                ContainerTracker.captureBeforeRemoval(serverWorld, pos);
+            }
             return true;
         });
 
         PlayerBlockBreakEvents.AFTER.register((world, player, pos, state, blockEntity) -> {
             CoreProtectFabric mod = CoreProtectFabric.instance();
-            if (mod == null || world.isClient() || !(world instanceof ServerWorld)) return;
+            if (mod == null || world.isClient() || !(world instanceof ServerWorld serverWorld)) return;
             if (!mod.config().logging.block) return;
+            String user = player.getGameProfile().getName();
             mod.database().insertBlockAsync(new DatabaseManager.BlockLog(
-                    0, TimeUtil.now(), player.getGameProfile().getName(),
+                    0, TimeUtil.now(), user,
                     world.getRegistryKey().getValue().toString(),
                     pos.getX(), pos.getY(), pos.getZ(),
                     DatabaseManager.TYPE_BREAK,
                     BlockStateUtil.stringify(state),
                     BlockStateUtil.stringify(Blocks.AIR.getDefaultState()),
                     "-",
-                    BlockStateUtil.signTextToJson(blockEntity)));
+                    // L3-11: both sign faces; CoreProtectFabric#signMeta keeps the front lines in
+                    // the shape BlockStateUtil#applySignText expects and adds the back face.
+                    CoreProtectFabric.signMeta(blockEntity)));
+            // L3-15: vanilla removes the other half of a tall plant/door/bed through a neighbour
+            // update, which never reaches a player/replace hook here - record it explicitly.
+            CoreProtectFabric.logDoubleHalf(serverWorld, user, pos, state);
         });
 
         UseBlockCallback.EVENT.register(BlockEventListener::onUse);
@@ -149,7 +162,8 @@ public final class BlockEventListener {
                         BlockStateUtil.stringify(oldState),
                         BlockStateUtil.stringify(now),
                         "+",
-                        BlockStateUtil.signTextToJson(be)));
+                        // L3-11: a placed sign keeps both of its faces.
+                        CoreProtectFabric.signMeta(be)));
             }
             if (mod.inspector().isInspecting(player)) {
                 mod.inspector().lookupForBlock(player, placed);

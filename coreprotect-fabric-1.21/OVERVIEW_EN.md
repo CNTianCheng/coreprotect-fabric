@@ -1,4 +1,4 @@
-# CoreProtect Fabric — Mod Overview (v1.9.3)
+# CoreProtect Fabric — Mod Overview (v1.9.4)
 
 ## One-Line Summary
 
@@ -46,7 +46,7 @@
 
 ### 4. Inspection Mode
 
-After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left-click** a block to view its history, **right-click** to view container transactions or the adjacent block, **place a block** to run a lookup for that block type. Block breaking is disabled in inspection mode to prevent accidental damage during investigation.
+After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left-click** a block to view its history, **right-click** to view container transactions or the adjacent block, **right-click with a block in hand** to run a lookup for that block type without placing it. Block breaking is disabled in inspection mode to prevent accidental damage during investigation.
 
 ### 5. Online Records
 
@@ -104,9 +104,9 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 | Requirement | Value |
 |---|---|
 | Minecraft | **1.21** (for 1.21.1, use the matching build in the `coreprotect-fabric/` directory) |
-| Server | Fabric Loader ≥ 0.16 + Fabric API |
+| Server | Fabric Loader ≥ 0.16.9 + Fabric API ≥ 0.102.0+1.21 |
 | Java | 21 |
-| Install | Drop `coreprotect-fabric-1.21-1.9.3.jar` into `mods/`; config and database are generated on first launch |
+| Install | Drop `coreprotect-fabric-1.21-1.9.4.jar` into `mods/`; config and database are generated on first launch |
 
 > The mod is also available for the full range 1.21.2 ~ 1.21.11 and 26.1 ~ 26.2 (each build lives in its own project directory) with the same feature set.
 
@@ -117,7 +117,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 - **Dispute forensics**: inspection mode pinpoints the on-site history quickly; `/co online` verifies player join/leave times
 - **Server administration**: session/command/chat logs plus automatic data pruning assist audits and moderation
 
-## Known Limitations (v1.9.3)
+## Known Limitations (v1.9.4)
 
 - Hopper (`#hopper`), dropper (`#dropper`) and dispenser (`#dispenser`) transactions are all logged
 - Item-drop logging covers player drops and pickups; drops spawned by breaking blocks are not recorded separately (they are already part of the block-break record)
@@ -125,7 +125,7 @@ After `/co inspect` (or the shorthand `/co i`, with optional `on`/`off`): **left
 - Kill records are not rolled back (same as the original CoreProtect)
 - Large rollbacks run on the main thread (protected by the `maxBlocks` cap)
 - Container rollback uses a simplified item-recovery strategy: withdrawn items are preferably taken from the container and returned to the operator, with missing amounts compensated
-- Natural-event and similar hooks are best-effort (`defaultRequire: 0`): if a future game update breaks an individual hook, only that category stops logging — everything else keeps working
+- Natural-event and similar hooks are mandatory mixins (`defaultRequire: 1`): if a future game update breaks one, the server fails at startup with an error naming the hook instead of silently losing a category of records
 
 ## License & Credits
 

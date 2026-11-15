@@ -2,11 +2,16 @@ package net.coreprotect.fabric;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import net.coreprotect.fabric.command.CoCommand;
 import net.coreprotect.fabric.config.CoreProtectConfig;
 import net.coreprotect.fabric.container.ContainerTracker;
@@ -22,20 +27,38 @@ import net.coreprotect.fabric.inspect.Inspector;
 import net.coreprotect.fabric.rollback.RollbackManager;
 import net.coreprotect.fabric.util.BStatsMetrics;
 import net.coreprotect.fabric.util.BlockStateUtil;
+import net.coreprotect.fabric.util.ItemStackCodec;
 import net.coreprotect.fabric.util.NaturalBreakCause;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.coreprotect.fabric.util.UpdateChecker;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.world.level.block.BaseFireBlock;
+import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.LiquidBlock;
-import net.minecraft.world.level.block.piston.PistonBaseBlock;
+import net.minecraft.world.level.block.DoublePlantBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.entity.SignBlockEntity;
+import net.minecraft.world.level.block.entity.SignText;
+import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.decoration.ItemFrame;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.Container;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -44,22 +67,28 @@ import org.slf4j.LoggerFactory;
 
 public final class CoreProtectFabric implements ModInitializer {
     public static final String MOD_ID = "coreprotect";
-    public static final String MOD_VERSION = "1.9.3";
+    public static final String MOD_VERSION = "1.9.4";
     public static final Logger LOGGER = LoggerFactory.getLogger("CoreProtect");
 
     /**
-     * Natural causes that reach us through {@code Level#setBlockState}: explosions,
-     * endermen, pistons, fluid flow and fire. Fire belongs here as well as in
-     * {@link #BREAK_CAUSES} because {@code FireBlock} burns fuel by REPLACING the block
-     * through {@code setBlockState} (only the removal of the fire blocks themselves goes
-     * through {@code removeBlock}). Causes that only ever remove a block (leaf decay) stay
-     * in {@link #BREAK_CAUSES} only — listing one in both sets would log every removal twice.
+     * Natural causes that reach us through {@code World#setBlockState}: explosions,
+     * endermen, pistons, fluid flow, fire, falling blocks, random ticks and trampled
+     * farmland. Fire belongs here as well as in {@link #BREAK_CAUSES} because
+     * {@code FireBlock} burns fuel by REPLACING the block through {@code setBlockState}
+     * (only the removal of the fire blocks themselves goes through {@code removeBlock}).
+     * Causes that only ever remove a block (leaf decay) stay in {@link #BREAK_CAUSES} only
+     * — listing one in both sets would log every removal twice.
      */
     private static final Set<String> SET_STATE_CAUSES = Set.of(
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal", "#enderman", "#piston",
-            "#water", "#lava", "#fluid", "#fire");
+            "#water", "#lava", "#fluid", "#fire",
+            // L3-12 (falling blocks), L3-18 (random ticks), L3-14 (trampled farmland).
+            "#gravity", "#random_tick", "#trample");
     private static final Set<String> BREAK_CAUSES = Set.of(
-            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston");
+            "#fire", "#water", "#lava", "#fluid", "#decay", "#enderman", "#piston",
+            // A random tick or a falling block can also remove its block through
+            // World#breakBlock/removeBlock; the E6 duplicate check keeps that single-logged.
+            "#gravity", "#random_tick", "#trample");
     private static final Set<String> EXPLOSION_CAUSES = Set.of(
             "#explosion", "#creeper", "#tnt", "#wither", "#end_crystal");
     private static final Set<String> FLUID_CAUSES = Set.of("#water", "#lava", "#fluid");
@@ -202,40 +231,128 @@ public final class CoreProtectFabric implements ModInitializer {
     }
 
     // ------------------------------------------------------------------
-    // Packet-level audit hooks (commands, sign edits)
+    // Packet-level audit hooks (commands, chat, sign edits)
     // ------------------------------------------------------------------
 
-    /** Records one player may write through the packet hooks per {@link #PACKET_LOG_WINDOW_MS}. */
-    private static final int PACKET_LOG_MAX = 60;
+    /**
+     * The record kinds driven by client packets. Each kind keeps its own budget (L3-09):
+     * a client that edits signs in a loop must not squeeze command records out of the same
+     * quota, and chat needs a limit of its own (L3-08). Every dropped record is counted so
+     * {@code /co status} shows it instead of silently losing rows.
+     */
+    public enum LogKind {
+        /** Chat messages; vanilla sends at most one per tick, a modified client does not. */
+        CHAT(40),
+        /** Commands. */
+        COMMAND(60),
+        /** Sign text edits. */
+        SIGN(60);
+
+        private final int limit;
+
+        LogKind(int limit) {
+            this.limit = limit;
+        }
+    }
+
     private static final long PACKET_LOG_WINDOW_MS = 60_000L;
     /** Tracked players before expired windows are pruned again. */
     private static final int PACKET_LOG_MAX_TRACKED = 256;
+    /** Longest stored command or chat line; longer payloads are truncated (L3-07, L3-08). */
+    private static final int MAX_TEXT_LENGTH = 256;
 
-    /** Per-player {windowStart, records} counters; the hooks are fed by unvalidated packets. */
-    private static final Map<UUID, long[]> PACKET_LOG_WINDOWS = new ConcurrentHashMap<>();
+    /** Per kind and player {@code {windowStart, records}} counters. */
+    private static final Map<LogKind, Map<UUID, long[]>> PACKET_LOG_WINDOWS = new ConcurrentHashMap<>();
 
     /**
-     * Rate limit for the command and sign-edit hooks (B8). Both are driven by client
-     * packets, so a modified client could otherwise fill the audit tables with records
-     * that no vanilla action backs. Returns {@code false} for records that must be dropped.
+     * Rate limit for the packet-driven hooks (B8). They are fed by client packets, so a
+     * modified client could otherwise fill the audit tables with records that no vanilla
+     * action backs. Returns {@code false} for records that must be dropped; the drop is
+     * counted in the database, so it is visible in {@code /co status} (L3-09).
      */
-    public static boolean allowPacketLog(UUID playerId) {
+    public static boolean allowPacketLog(UUID playerId, LogKind kind) {
+        if (playerId == null || kind == null) return true;
         long now = System.currentTimeMillis();
-        if (PACKET_LOG_WINDOWS.size() > PACKET_LOG_MAX_TRACKED) {
-            PACKET_LOG_WINDOWS.values().removeIf(window -> now - window[0] >= PACKET_LOG_WINDOW_MS);
+        Map<UUID, long[]> windows = PACKET_LOG_WINDOWS.computeIfAbsent(kind, key -> new ConcurrentHashMap<>());
+        if (windows.size() > PACKET_LOG_MAX_TRACKED) {
+            windows.values().removeIf(window -> now - window[0] >= PACKET_LOG_WINDOW_MS);
         }
-        long[] window = PACKET_LOG_WINDOWS.computeIfAbsent(playerId, key -> new long[]{now, 0L});
-        if (now - window[0] >= PACKET_LOG_WINDOW_MS) {
-            window[0] = now;
-            window[1] = 0L;
+        long[] window = windows.computeIfAbsent(playerId, key -> new long[]{now, 0L});
+        synchronized (window) {
+            if (now - window[0] >= PACKET_LOG_WINDOW_MS) {
+                window[0] = now;
+                window[1] = 0L;
+            }
+            window[1]++;
+            if (window[1] <= kind.limit) return true;
+            if (window[1] == kind.limit + 1L) {
+                LOGGER.warn("[CoreProtect] Throttling {} records for a player: more than {} entries per minute.",
+                        kind.name().toLowerCase(Locale.ROOT), kind.limit);
+            }
         }
-        window[1]++;
-        if (window[1] <= PACKET_LOG_MAX) return true;
-        if (window[1] == PACKET_LOG_MAX + 1L) {
-            LOGGER.warn("[CoreProtect] Throttling command/sign records for a player: more than {} entries per minute.",
-                    PACKET_LOG_MAX);
-        }
+        dropRecord();
         return false;
+    }
+
+    /** Counts one record this side threw away, so {@code /co status} is not blind (L3-09). */
+    private static void dropRecord() {
+        CoreProtectFabric mod = instance;
+        if (mod == null) return;
+        mod.database.countDroppedRow();
+    }
+
+    /**
+     * Flattens a command or chat line before it is stored: embedded line breaks would break
+     * the log layout and an unbounded length lets a client inflate every row (L3-07, L3-08).
+     */
+    public static String sanitizeText(String text) {
+        if (text == null) return "";
+        String flat = text.replace('\n', ' ').replace('\r', ' ');
+        return flat.length() <= MAX_TEXT_LENGTH ? flat : flat.substring(0, MAX_TEXT_LENGTH);
+    }
+
+    // ------------------------------------------------------------------
+    // Command hook (L3-20 / L5-03 / L3-07)
+    // ------------------------------------------------------------------
+
+    /**
+     * Records a command where the command manager really executes it: {@code CommandManager#execute}
+     * is the single point every source funnels through (console, RCON, command blocks, sign
+     * commands and both player packet paths). Hooking the packet handlers instead recorded
+     * commands that were rejected afterwards (L5-03: the signed path bails out on a chat-chain
+     * failure, and handleChatCommand only queues) and missed every non-player source (L3-20).
+     * Datapack functions do not pass here (they run through the function manager), so a
+     * function that runs hundreds of commands cannot flood the table.
+     *
+     * <p>Commands on the config blacklist are skipped entirely - not stored and not counted
+     * (L3-07). Player commands keep the per-player rate limit; console/RCON/command-block
+     * commands are trusted.</p>
+     */
+    public static void hookCommandExecution(CommandSourceStack source, String command) {
+        try {
+            CoreProtectFabric mod = instance;
+            if (mod == null || source == null || command == null) return;
+            if (!mod.config.logging.command) return;
+            if (!mod.config.shouldLogCommand(command)) return;
+            String name;
+            ServerPlayer player = source.getPlayer();
+            if (player != null) {
+                if (!allowPacketLog(player.getUUID(), LogKind.COMMAND)) return;
+                name = player.getGameProfile().name();
+            } else {
+                name = source.getTextName();
+                if (name == null || name.isBlank()) {
+                    name = "#server";
+                }
+            }
+            // the world the command was run in (L3-21): console/RCON commands carry the
+            // overworld, player commands the dimension they stood in
+            String wid = source.getLevel().dimension().identifier().toString();
+            mod.database.insertCommandAsync(TimeUtil.now(), name, wid, sanitizeText(command));
+        } catch (Throwable t) {
+            // This runs inside the command manager; a logging failure must never break a command.
+            LOGGER.warn("[CoreProtect] Failed to log a command: {}", t.toString());
+        }
     }
 
     // ------------------------------------------------------------------
@@ -243,24 +360,36 @@ public final class CoreProtectFabric implements ModInitializer {
     // ------------------------------------------------------------------
 
     public static void hookSetBlockState(Level world, BlockPos pos, BlockState newState) {
+        hookSetBlockState(world, pos, newState, 0);
+    }
+
+    /**
+     * @param flags the vanilla {@code Block} flags of the write. A write carrying
+     *              {@code Block#UPDATE_MOVE_BY_PISTON} is part of a piston move: the movement itself is
+     *              recorded from the piston block entity (with the correct source and
+     *              destination), so the source cell being cleared here stays silent - logging
+     *              it as well would produce the same change twice (L3-01/L2-11).
+     */
+    public static void hookSetBlockState(Level world, BlockPos pos, BlockState newState, int flags) {
         try {
-            hookSetBlockStateInternal(world, pos, newState);
+            hookSetBlockStateInternal(world, pos, newState, flags);
         } catch (Throwable t) {
             // E16: this hook runs inside vanilla world code. A logging failure must never
-            // abort the vanilla write, and must not skip the mixin TAIL that clears the
+            // abort the vanilla write, and must not skip the mixin RETURN that clears the
             // cause window either.
             LOGGER.warn("[CoreProtect] Failed to log a natural setBlockState at {}: {}", pos, t.toString());
         }
     }
 
-    private static void hookSetBlockStateInternal(Level world, BlockPos pos, BlockState newState) {
+    private static void hookSetBlockStateInternal(Level world, BlockPos pos, BlockState newState, int flags) {
         CoreProtectFabric mod = instance;
         if (mod == null || world.isClientSide() || mod.server == null) return;
         if (!mod.config.logging.natural) return;
+        if ((flags & Block.UPDATE_MOVE_BY_PISTON) != 0) return;
         NaturalBreakCause.Cause cause = NaturalBreakCause.get();
         if (cause == null || !SET_STATE_CAUSES.contains(cause.type)) return;
         // E11: the hook runs at HEAD because it needs the state BEFORE the write (at RETURN
-        // Level#getBlockState already returns the new state). The writes vanilla rejects in
+        // World#getBlockState already returns the new state). The writes vanilla rejects in
         // that case have to be filtered here, otherwise they produce records for changes that
         // never happened: outside the load limit / in a debug world / a null state.
         // (The remaining rejection - WorldChunk#setBlockState returning null - only happens
@@ -274,7 +403,7 @@ public final class CoreProtectFabric implements ModInitializer {
         // Delegated overloads of setBlockState report the same change twice; a genuine
         // second change at the same position (different states) is still logged.
         if (cause.alreadyLoggedSet(pos, oldState, newState)) return;
-        // E6: Level#removeBlock first fires the break hook and then delegates to setBlockState,
+        // E6: World#removeBlock first fires the break hook and then delegates to setBlockState,
         // so the same removal reached both ledgers and was recorded twice. A delegated write
         // that is not air (the fluid state of a waterlogged block, ...) is a real second
         // change and stays logged.
@@ -297,10 +426,21 @@ public final class CoreProtectFabric implements ModInitializer {
         // Water/lava flow constantly replaces air and fluid states; only actual block destruction is logged.
         if (FLUID_CAUSES.contains(cause.type)
                 && (oldState.isAir() || oldState.getBlock() instanceof LiquidBlock)) return;
+        // Random ticks grow trees, mushrooms, crops and grass into AIR; those writes are not a
+        // change of an existing block. Real random-tick damage (ice melting, snow thawing,
+        // copper oxidising, coral dying, grass spreading) always replaces or removes one (L3-18).
+        // A fire block is never recorded on its own (same policy as in the #fire window above).
+        if ("#random_tick".equals(cause.type)
+                && (oldState.isAir() || oldState.getBlock() instanceof BaseFireBlock)) return;
         cause.lastSetPos = pos;
         cause.lastSetOld = oldState;
         cause.lastSetNew = newState;
-        mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, newState, cause.type));
+        if (newState.isAir()) {
+            // L3-05: a container that is blown up or pushed away keeps its contents in the
+            // block entity, which vanishes with the block; capture them while they still exist.
+            captureContainerBeforeRemoval(world, pos);
+        }
+        mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, newState, cause.type, signMetaAt(world, pos)));
     }
 
     public static void hookBreakBlock(Level world, BlockPos pos) {
@@ -329,7 +469,10 @@ public final class CoreProtectFabric implements ModInitializer {
         if ("#piston".equals(cause.type) && isPistonPart(oldState)) return;
         cause.lastBreakPos = pos;
         cause.lastBreakOld = oldState;
-        mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, Blocks.AIR.defaultBlockState(), cause.type));
+        // L3-05: see hookSetBlockStateInternal - the contents have to be read before the block goes.
+        captureContainerBeforeRemoval(world, pos);
+        mod.database.insertBlockAsync(mod.naturalLog(world, pos, oldState, Blocks.AIR.defaultBlockState(), cause.type,
+                signMetaAt(world, pos)));
     }
 
     private static boolean isPistonPart(BlockState state) {
@@ -347,7 +490,7 @@ public final class CoreProtectFabric implements ModInitializer {
         try {
             logPistonMoveInternal(world, pos, state, blockEntity);
         } catch (Throwable t) {
-            // E16: the mixin TAIL that calls this runs inside the vanilla piston tick, so a
+            // E16: the mixin RETURN that calls this runs inside the vanilla piston tick, so a
             // logging failure here would break the piston itself.
             LOGGER.warn("[CoreProtect] Failed to log a piston movement at {}: {}", pos, t.toString());
         }
@@ -364,30 +507,261 @@ public final class CoreProtectFabric implements ModInitializer {
         if (blockEntity.isSourcePiston()) return; // head-only movement (no block pushed)
         BlockState moved = blockEntity.getMovedState();
         if (moved == null || moved.isAir()) return;
-        Direction facing = state.getValue(PistonBaseBlock.FACING);
+        // L3-01: the block entity lives at the DESTINATION of the block it moves.
+        // PistonBaseBlock#move clears the source at the moved row's own position and creates the
+        // block entity at "source.relative(travel)" (PistonBaseBlock.java:280 for the travel
+        // direction, :298-304 for the write), so the source has to be derived from the travel
+        // direction: extending moves along the facing, retracting against it.
+        Direction facing = blockEntity.getDirection();
         boolean extending = blockEntity.isExtending();
-        BlockPos from = extending ? pos.relative(facing) : pos.relative(facing, 2);
-        BlockPos to = extending ? pos.relative(facing, 2) : pos.relative(facing);
+        BlockPos to = pos;
+        BlockPos from = extending ? pos.relative(facing.getOpposite()) : pos.relative(facing);
+        // L3-05: a container being pushed away loses its contents with the block entity.
+        captureContainerBeforeRemoval(world, from);
+        // L2-11: both rows describe one atomic movement, so they carry the partner cell in the
+        // meta. A lookup/rollback filter that only matches one of the two positions can use it
+        // to replay (or restore) the pair together instead of copying or losing a block.
+        String pair = pistonPairMeta(from, to);
         String wid = world.dimension().identifier().toString();
         long time = TimeUtil.now();
         mod.database.insertBlockAsync(new DatabaseManager.BlockLog(
                 0L, time, "#piston", wid,
                 from.getX(), from.getY(), from.getZ(),
                 DatabaseManager.TYPE_NATURAL, BlockStateUtil.stringify(moved),
-                BlockStateUtil.stringify(Blocks.AIR.defaultBlockState()), "#piston", null));
+                BlockStateUtil.stringify(Blocks.AIR.defaultBlockState()), "#piston", pair));
         mod.database.insertBlockAsync(new DatabaseManager.BlockLog(
                 0L, time, "#piston", wid,
                 to.getX(), to.getY(), to.getZ(),
                 DatabaseManager.TYPE_NATURAL, BlockStateUtil.stringify(Blocks.AIR.defaultBlockState()),
-                BlockStateUtil.stringify(moved), "#piston", null));
+                BlockStateUtil.stringify(moved), "#piston", pair));
     }
 
-    private DatabaseManager.BlockLog naturalLog(Level world, BlockPos pos, BlockState oldState, BlockState newState, String cause) {
+    private static String pistonPairMeta(BlockPos from, BlockPos to) {
+        JsonObject piston = new JsonObject();
+        piston.add("from", posJson(from));
+        piston.add("to", posJson(to));
+        JsonObject payload = new JsonObject();
+        payload.add("piston", piston);
+        return payload.toString();
+    }
+
+    private static JsonArray posJson(BlockPos pos) {
+        JsonArray array = new JsonArray();
+        array.add(pos.getX());
+        array.add(pos.getY());
+        array.add(pos.getZ());
+        return array;
+    }
+
+    // ------------------------------------------------------------------
+    // Containers (L3-05) and double blocks (L3-15)
+    // ------------------------------------------------------------------
+
+    /**
+     * Reads a container's contents before the block that holds them is replaced. The tracker
+     * is a no-op for every block that is not a container, deduplicates within one tick and
+     * never throws (it is called from inside vanilla world code).
+     */
+    private static void captureContainerBeforeRemoval(Level world, BlockPos pos) {
+        if (!(world instanceof ServerLevel serverWorld) || pos == null) return;
+        CoreProtectFabric mod = instance;
+        if (mod == null || !mod.config.logging.container) return;
+        ContainerTracker.captureBeforeRemoval(serverWorld, pos);
+    }
+
+    /**
+     * The other half of a tall plant, door or bed. Vanilla removes it through a neighbour
+     * update ({@code DoublePlantBlock.java:126}, {@code BedBlock.java:189}) or a creative break,
+     * which never reached a hook, so half of the structure stayed unrecorded (L3-15).
+     * Returns {@code null} for every other block.
+     */
+    public static BlockPos otherDoubleHalf(BlockState state, BlockPos pos) {
+        if (state == null || pos == null) return null;
+        Block block = state.getBlock();
+        if (block instanceof DoublePlantBlock) {
+            return state.getValue(DoublePlantBlock.HALF) == DoubleBlockHalf.UPPER ? pos.below() : pos.above();
+        }
+        if (block instanceof DoorBlock) {
+            return state.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER ? pos.below() : pos.above();
+        }
+        if (block instanceof BedBlock) {
+            Direction facing = state.getValue(BedBlock.FACING);
+            return state.getValue(BedBlock.PART) == BedPart.FOOT ? pos.relative(facing) : pos.relative(facing.getOpposite());
+        }
+        return null;
+    }
+
+    /** The state of the other half of the same double block, or {@code null}. */
+    public static BlockState otherDoubleHalfState(BlockState state) {
+        if (state == null) return null;
+        Block block = state.getBlock();
+        if (block instanceof DoublePlantBlock) {
+            DoubleBlockHalf half = state.getValue(DoublePlantBlock.HALF);
+            return state.setValue(DoublePlantBlock.HALF,
+                    half == DoubleBlockHalf.UPPER ? DoubleBlockHalf.LOWER : DoubleBlockHalf.UPPER);
+        }
+        if (block instanceof DoorBlock) {
+            DoubleBlockHalf half = state.getValue(DoorBlock.HALF);
+            return state.setValue(DoorBlock.HALF,
+                    half == DoubleBlockHalf.UPPER ? DoubleBlockHalf.LOWER : DoubleBlockHalf.UPPER);
+        }
+        if (block instanceof BedBlock) {
+            BedPart part = state.getValue(BedBlock.PART);
+            return state.setValue(BedBlock.PART, part == BedPart.FOOT ? BedPart.HEAD : BedPart.FOOT);
+        }
+        return null;
+    }
+
+    /**
+     * Records the other half of a double block that vanilla removed together with the block a
+     * player broke. Only the player path needs this: a natural removal happens inside the cause
+     * window, where the neighbour update is logged by the {@code setBlockState} hook already.
+     */
+    public static void logDoubleHalf(ServerLevel world, String user, BlockPos pos, BlockState state) {
+        if (world == null || user == null || pos == null || state == null) return;
+        CoreProtectFabric mod = instance;
+        if (mod == null || !mod.config.logging.block) return;
+        BlockPos other = otherDoubleHalf(state, pos);
+        BlockState otherState = otherDoubleHalfState(state);
+        if (other == null || otherState == null) return;
+        // Only when vanilla really removed it: a lone half leaves the position air as well, but
+        // then the block was never part of a complete structure at that spot.
+        if (!world.getBlockState(other).isAir()) return;
+        mod.database.insertBlockAsync(new DatabaseManager.BlockLog(
+                0L, TimeUtil.now(), user,
+                world.dimension().identifier().toString(),
+                other.getX(), other.getY(), other.getZ(),
+                DatabaseManager.TYPE_BREAK,
+                BlockStateUtil.stringify(otherState),
+                BlockStateUtil.stringify(Blocks.AIR.defaultBlockState()),
+                "-", null));
+    }
+
+    // ------------------------------------------------------------------
+    // Sign text (L3-11)
+    // ------------------------------------------------------------------
+
+    /**
+     * JSON meta for a sign that stores BOTH faces: the top-level {@code side}/{@code lines}
+     * keep working for {@code BlockStateUtil#applySignText} (front face restore), and the
+     * {@code back} member carries the back face that used to be dropped (L3-11).
+     */
+    public static String signMeta(BlockEntity blockEntity) {
+        if (!(blockEntity instanceof SignBlockEntity sign)) return null;
+        try {
+            JsonObject payload = new JsonObject();
+            payload.addProperty("side", "front");
+            payload.add("lines", signLines(sign.getFrontText()));
+            JsonArray back = signLines(sign.getBackText());
+            for (int i = 0; i < back.size(); i++) {
+                if (!back.get(i).getAsString().isBlank()) {
+                    JsonObject backPayload = new JsonObject();
+                    backPayload.addProperty("side", "back");
+                    backPayload.add("lines", back);
+                    payload.add("back", backPayload);
+                    break;
+                }
+            }
+            return payload.toString();
+        } catch (Throwable t) {
+            // A broken sign must never make the block record disappear.
+            return null;
+        }
+    }
+
+    /** Sign meta of the block entity standing at {@code pos} at this moment, or {@code null}. */
+    public static String signMetaAt(Level world, BlockPos pos) {
+        if (!(world instanceof ServerLevel) || pos == null) return null;
+        return signMeta(world.getBlockEntity(pos));
+    }
+
+    private static JsonArray signLines(SignText text) {
+        JsonArray lines = new JsonArray();
+        for (int i = 0; i < 4; i++) {
+            lines.add(text.getMessage(i, false).getString());
+        }
+        return lines;
+    }
+
+    // ------------------------------------------------------------------
+    // Destroyed entity containers (L3-16)
+    // ------------------------------------------------------------------
+
+    /** Last player that hit an entity, so the item records name the killer. Bounded on purpose. */
+    private static final Map<UUID, String> ENTITY_ATTACKERS = new ConcurrentHashMap<>();
+    private static final int ENTITY_ATTACKER_MAX = 512;
+
+    /** Called from the attack callback, i.e. before the damage that may destroy the entity. */
+    public static void noteEntityAttacker(Entity target, Player attacker) {
+        if (!(target instanceof Entity) || attacker == null) return;
+        if (!(attacker instanceof ServerPlayer serverPlayer)) return;
+        try {
+            if (ENTITY_ATTACKERS.size() > ENTITY_ATTACKER_MAX) {
+                ENTITY_ATTACKERS.clear();
+            }
+            ENTITY_ATTACKERS.put(target.getUUID(), serverPlayer.getGameProfile().name());
+        } catch (Throwable t) {
+            LOGGER.warn("[CoreProtect] Failed to remember an entity attacker: {}", t.toString());
+        }
+    }
+
+    /**
+     * Records the contents of a container entity (minecart with chest, chest boat, item frame)
+     * that is being destroyed. The entity vanishes together with its items and no vanilla
+     * event reports them (L3-16).
+     */
+    public static void hookEntityRemoval(Entity entity) {
+        try {
+            CoreProtectFabric mod = instance;
+            if (mod == null || entity == null || !(entity.level() instanceof ServerLevel world)) return;
+            if (!mod.config.logging.item) return;
+            List<ItemStack> stacks = entityContents(entity);
+            if (stacks.isEmpty()) return;
+            String user = ENTITY_ATTACKERS.remove(entity.getUUID());
+            if (user == null) {
+                user = "#entity";
+            }
+            BlockPos pos = entity.blockPosition();
+            String wid = world.dimension().identifier().toString();
+            long time = TimeUtil.now();
+            for (ItemStack stack : stacks) {
+                mod.database.insertItemAsync(new DatabaseManager.ItemLog(
+                        0, time, user, wid,
+                        pos.getX(), pos.getY(), pos.getZ(), "-",
+                        BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(),
+                        ItemStackCodec.encodeIdentity(stack, world.registryAccess())));
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[CoreProtect] Failed to log the contents of a removed entity: {}", t.toString());
+        }
+    }
+
+    private static List<ItemStack> entityContents(Entity entity) {
+        List<ItemStack> stacks = new ArrayList<>();
+        if (entity instanceof Container inventory) {
+            for (int i = 0; i < inventory.getContainerSize(); i++) {
+                ItemStack stack = inventory.getItem(i);
+                if (!stack.isEmpty()) {
+                    stacks.add(stack.copy());
+                }
+            }
+        } else if (entity instanceof ItemFrame frame) {
+            ItemStack held = frame.getItem();
+            if (!held.isEmpty()) {
+                stacks.add(held.copy());
+            }
+        }
+        return stacks;
+    }
+
+    /** Builds a natural (non-player) record; {@code meta} carries the sign faces when relevant. */
+    private DatabaseManager.BlockLog naturalLog(Level world, BlockPos pos, BlockState oldState, BlockState newState,
+                                                String cause, String meta) {
         return new DatabaseManager.BlockLog(
                 0L, TimeUtil.now(), cause,
                 world.dimension().identifier().toString(),
                 pos.getX(), pos.getY(), pos.getZ(),
                 2, BlockStateUtil.stringify(oldState), BlockStateUtil.stringify(newState),
-                cause, null);
+                cause, meta);
     }
 }

@@ -7,14 +7,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 # $WorkDir decides which java.exe gets killed and which directory is cleaned up below, so
-# it has to resolve to a directory inside this repository.
-if (-not [System.IO.Path]::IsPathRooted($WorkDir)) { $WorkDir = Join-Path $root $WorkDir }
-$rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
-$WorkDir = [System.IO.Path]::GetFullPath($WorkDir).TrimEnd('\')
-if (-not $WorkDir.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "invalid -WorkDir '$WorkDir': must be a directory inside $rootFull"
-}
-if (-not (Test-Path -LiteralPath $WorkDir)) { throw "missing -WorkDir '$WorkDir'" }
+# it has to resolve to a directory inside this repository. The check lives in lib\kill-java.ps1
+# so the other test-*.ps1 helpers share exactly this implementation (F11/L5-06).
+. (Join-Path $PSScriptRoot 'lib\kill-java.ps1')
+$WorkDir = Assert-WorkDir -WorkDir $WorkDir -Root $root
 $jdk = Join-Path $root ".build-tools\jdk\$Jdk"
 if (-not (Test-Path $jdk)) { $jdk = 'C:\Program Files\Java\graalvm-jdk-25.0.2+10.1' }
 $env:JAVA_HOME = $jdk
@@ -22,9 +18,7 @@ Set-Location $WorkDir
 
 # Match the resolved full path (no wildcard expansion) so an unrelated JVM that merely
 # mentions the same folder name is left running.
-$stale = Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($WorkDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
-if ($stale) { $stale | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Seconds 5 }
+Stop-StaleJava -WorkDir $WorkDir
 
 $runDir = Join-Path $WorkDir 'run'
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
@@ -91,7 +85,7 @@ $cmds = @(
     @{ c = 'co reload'; d = 4 },
     # ---- rollback / undo ----
     @{ c = 'execute if block 7 -62 6 minecraft:dirt'; d = 2 },
-    @{ c = 'co rollback t:5m r:80'; d = 12 },
+    @{ c = 'co rollback t:5m'; d = 12 },
     @{ c = 'execute if block 7 -62 6 minecraft:dirt'; d = 2 },
     @{ c = 'co undo'; d = 12 },
     @{ c = 'execute if block 7 -62 6 minecraft:air'; d = 2 },
@@ -100,12 +94,12 @@ $cmds = @(
     # each other; when the first one is still slicing, the next two answer with the busy
     # message instead of interleaving. (No assertion: a tiny test world may finish in one
     # tick, in which case they simply run one after another.)
-    @{ c = 'co rollback t:5m r:80'; d = 3 },
-    @{ c = 'co rollback t:5m r:80'; d = 0 },
+    @{ c = 'co rollback t:5m'; d = 3 },
+    @{ c = 'co rollback t:5m'; d = 0 },
     @{ c = 'co undo'; d = 0 },
     @{ c = 'co status'; d = 12 },
     # ---- restore ----
-    @{ c = 'co restore t:5m r:80'; d = 12 },
+    @{ c = 'co restore t:5m'; d = 12 },
     @{ c = 'co undo'; d = 12 },
     @{ c = 'co lookup a:#tnt'; d = 6 },
     # ---- purge ----

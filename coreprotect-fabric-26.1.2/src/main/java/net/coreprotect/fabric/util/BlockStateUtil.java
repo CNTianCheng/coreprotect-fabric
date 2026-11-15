@@ -64,17 +64,28 @@ public final class BlockStateUtil {
         return id.startsWith("minecraft:") ? id.substring("minecraft:".length()) : id;
     }
 
-    /** Serializes a sign's front lines to JSON, or returns {@code null} if not a sign. */
+    /**
+     * Serializes a sign, or returns {@code null} when it carries no text. Both faces are stored: the
+     * front as the primary face and the back as {@code other} when it has text. Storing only the front
+     * lost the back side of every sign that was placed, edited or broken, so a rollback restored an
+     * empty front and silently dropped the back text.
+     */
     public static String signTextToJson(BlockEntity be) {
         if (!(be instanceof SignBlockEntity sign)) return null;
-        List<String> lines = new ArrayList<>();
-        boolean any = false;
-        for (int i = 0; i < 4; i++) {
-            String line = sign.getFrontText().getMessage(i, false).getString();
-            lines.add(line);
-            if (!line.isBlank()) any = true;
+        List<String> front = faceLines(sign.getFrontText());
+        List<String> back = faceLines(sign.getBackText());
+        boolean frontEmpty = isBlank(front);
+        boolean backEmpty = isBlank(back);
+        if (frontEmpty && backEmpty) return null;
+        if (backEmpty) {
+            // legacy plain array: the front face, still readable by older code and rows
+            return GSON.toJson(front);
         }
-        return any ? GSON.toJson(lines) : null;
+        if (frontEmpty) {
+            // only the back carries text, so it becomes the primary face and the side marker matches
+            return signPayload(false, back, front);
+        }
+        return signPayload(true, front, back);
     }
 
     /**
@@ -134,25 +145,29 @@ public final class BlockStateUtil {
     }
 
     /**
-     * Restores the sign face stored in a JSON meta string and returns the text that stood on that
-     * face before, in the same JSON form, so the change can be undone. Returns {@code null} when
-     * the stored value is unusable or the position does not hold a sign.
+     * Restores the sign text stored in a JSON meta string and returns the text of both faces as it was
+     * before, in the same JSON form, so the change can be undone. A payload that carries an
+     * {@code other} array also restores the opposite face - that is how a sign's back text survives a
+     * rollback. Returns {@code null} when the stored value is unusable or the position does not hold a
+     * sign.
      */
     public static String replaceSignText(ServerLevel world, BlockPos pos, String meta) {
         if (meta == null || meta.isBlank()) return null;
         try {
             List<String> lines = signLines(meta);
             if (lines == null) return null;
+            List<String> other = signLinesOf(meta, "other");
             BlockEntity be = world.getBlockEntity(pos);
             if (!(be instanceof SignBlockEntity sign)) return null;
             boolean front = !signIsBack(meta);
             SignText text = front ? sign.getFrontText() : sign.getBackText();
-            String previous = signTextToJson(text, front);
-            for (int i = 0; i < 4 && i < lines.size(); i++) {
-                String line = lines.get(i);
-                text = text.setMessage(i, Component.literal(line == null ? "" : line));
+            SignText otherText = front ? sign.getBackText() : sign.getFrontText();
+            // a snapshot of both faces: undoing the change has to restore exactly what stood there
+            String previous = signPayload(front, faceLines(text), faceLines(otherText));
+            sign.setText(withLines(text, lines), front);
+            if (other != null) {
+                sign.setText(withLines(otherText, other), !front);
             }
-            sign.setText(text, front);
             sign.setChanged();
             return previous;
         } catch (Exception e) {
@@ -160,15 +175,52 @@ public final class BlockStateUtil {
         }
     }
 
-    /** Serializes one face of a sign text, with the side marker used by the sign logs. */
-    private static String signTextToJson(SignText text, boolean front) {
-        List<String> lines = new ArrayList<>();
+    /** The four lines of one sign face, in the form the log stores them. */
+    private static List<String> faceLines(SignText text) {
+        List<String> lines = new ArrayList<>(4);
         for (int i = 0; i < 4; i++) {
             lines.add(text.getMessage(i, false).getString());
         }
+        return lines;
+    }
+
+    /** Applies up to four stored lines to a copy of {@code text}. */
+    private static SignText withLines(SignText text, List<String> lines) {
+        for (int i = 0; i < 4 && i < lines.size(); i++) {
+            String line = lines.get(i);
+            text = text.setMessage(i, Component.literal(line == null ? "" : line));
+        }
+        return text;
+    }
+
+    /** Whether every line of a face is empty. */
+    private static boolean isBlank(List<String> lines) {
+        for (String line : lines) {
+            if (line != null && !line.isBlank()) return false;
+        }
+        return true;
+    }
+
+    /** Serializes one face as the primary face, together with the lines of the opposite face. */
+    private static String signPayload(boolean primaryIsFront, List<String> primary, List<String> other) {
         java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
-        payload.put("side", front ? "front" : "back");
-        payload.put("lines", lines);
+        payload.put("side", primaryIsFront ? "front" : "back");
+        payload.put("lines", primary);
+        payload.put("other", other);
         return GSON.toJson(payload);
+    }
+
+    /** The lines stored under {@code key} of an object payload, or {@code null} when absent. */
+    private static List<String> signLinesOf(String meta, String key) {
+        if (meta == null || meta.isBlank()) return null;
+        try {
+            com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(meta);
+            if (parsed.isJsonObject()) {
+                com.google.gson.JsonElement lines = parsed.getAsJsonObject().get(key);
+                if (lines != null) return GSON.fromJson(lines, STRING_LIST.getType());
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 }

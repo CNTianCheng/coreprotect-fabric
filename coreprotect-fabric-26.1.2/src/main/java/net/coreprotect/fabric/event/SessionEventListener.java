@@ -28,7 +28,13 @@ public final class SessionEventListener {
             if (lang != null && mod.translator().isAvailable(lang)) {
                 mod.translator().setOverride(player.getUUID(), lang);
             }
-            mod.database().submitRead(() -> mod.database().userLanguage(name), stored -> {
+            String uuid = player.getUUID().toString();
+            // the uuid row is authoritative; the name row only exists for players who picked a
+            // language before v1.9.4 (L4-15)
+            mod.database().submitRead(() -> {
+                String byUuid = mod.database().userLanguageByUuid(uuid);
+                return byUuid != null ? byUuid : mod.database().userLanguage(name);
+            }, stored -> {
                 mod.translator().cacheUserLanguage(name, stored);
                 if (stored == null || !mod.translator().isAvailable(stored)) return;
                 ServerPlayer online = server.getPlayerList().getPlayerByName(name);

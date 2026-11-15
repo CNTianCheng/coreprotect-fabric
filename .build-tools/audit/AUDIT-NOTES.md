@@ -417,3 +417,319 @@ Java（`src/main/java/net/coreprotect/fabric/`）：
 6. 项目级 `status` 是 `processing`，而**这是本次发布之前就存在的状态，不是 v1.9.3 造成的**：`GET /v2/project/SXIMAuWt` 返回 `queued = 2026-09-05T08:57:03.819466Z`、`requested_status = approved`、`moderator_message`（空）—— 项目自 2026-09-05 起就排在 Modrinth 的审核队列里（1.9.0/1.9.1/1.9.2 的上传日期都在它之后），期间一直保持这个状态。含义按 Modrinth 口径是 `Processing — Project is not displayed on search, and not accessible by URL (Temporary state, project under review)`（<https://www.reddit.com/r/feedthebeast/comments/12r8e7t/withheld_on_modrinth/>）：`https://modrinth.com/mod/coreprotect-fabric` 的 `<title>` 是 `Project not found`，`/v2/search?query=coreprotect fabric` 只命中 `neoprotect`；对照组 `https://modrinth.com/mod/fabric-api` 正常显示标题；`https://status.modrinth.com/` 是 "All services are online"，所以不是平台故障。**已上传的文件仍然可用**：`HEAD https://cdn.modrinth.com/data/SXIMAuWt/versions/eldLUrfn/coreprotect-fabric-1.21-1.9.3.jar` → `HTTP 200`、`Content-Length: 14537297`、`Content-Type: application/java-archive`。**只有 Modrinth 站方能推进这条队列，不要为此重复上传或重复提交审核。**
 7. 教训：`git commit -m '...'` 里含双引号的正文会被 PowerShell 拆成 pathspec（`error: pathspec 'to' did not match any file(s)`）→ 改用 `git commit -F <临时文件>`；PS 5.1 的 `Invoke-RestMethod` 直连 `api.modrinth.com`（不显式设 TLS 1.2、不带 User-Agent）会拿 404，走 `.build-tools/modrinth/check.ps1` 即可；`git push` 偶发 `Recv failure: Connection was reset` / `Failed to connect to github.com:443`，等 1-2 分钟后重试就能成功。
 8. 图标口径（**永不改动**）：modrinth.com 上的图标哈希 `6988515318bc5bcd47a6b23d003f5a18c215933f`；本地 `.build-tools/modrinth/icon.png` 的 SHA-256 = `5df0aacd8c27dfaea01bf9dfdf815078fc46d39eb46c2f5fb3e94fd05f3f57b1`（发布流程从不传 `-SetIcon`、从不跑 `make-icon.ps1`）。
+
+## 9. 第二轮深度复查（v1.9.4-pre）
+
+### 9.1 目标、方法与基线
+
+- 用户要求（m03400）：先一次一问澄清到 95% 把握，再给完整方案；全范围重扫；主审 1.21.11、1.21 与 26.1.2 审差异；静态为主、高危点实测复现；**先出清单，用户决定后再改**；主挖新问题、抽查上轮修复；代码类遗留项一并核查。
+- 本轮定位：不依赖上一轮清单的独立复查。审查视角按「数据层 / 回档引擎 / 日志采集 / 命令与权限 / 移植与工具链」五路并行，每个视角必须回答「上一轮为什么没发现」（新引入 / 上轮盲区 / 上轮判为可接受但这次判为不可接受）。
+- 基线：`main` @ `57d42daa8955d849abd910f29262f65c885003c5`；三棵树工作区已跟踪文件干净；未跟踪项 16 个均为设计上不提交的产物（`.build-tools/apx-*`、`.dsh-*`、`angry-piglin-xp-1.21.11/`）。
+- 规模：三棵树各 40 个 Java 文件，1.21.11 = 7188 行、1.21 = 7187 行、26.1.2 = 7198 行；三棵树 `en_us.json` 均 118 键。
+- 分级沿用上轮：**P0** 数据损坏/安全/凭空物品；**P1** 功能错误或可被普通玩家触发的不良后果；**P2** 边界条件/性能/可维护性；**P3** 轻微。可信度标注：**已证实**（实测，或代码路径确定）/ **推理级**（需特定条件，未实测）。
+- 约束：本轮不改产品代码、不提交、不发版；实测如需临时补丁，验完必须还原并保持工作区干净；**永不改动 Modrinth 图标、不重复上传**。
+
+### 9.2 分级统计
+
+**去重后共 84 条**（同一缺陷被多路报到的按一条计，映射见表下）。按级别：
+
+| 级别 | 条数 | 说明 |
+|---|---|---|
+| **P0** | **2** | 都会被用户直接感知为「回档把世界改坏」：活塞坐标整体错位、`#fire` 窗口泄漏导致全员误归因 |
+| **P1** | **16** | 静默丢日志 / 误伤无辜玩家 / 回档造或丢物品 / 敏感信息泄露 / 特性完全失效 / 主线程开销失控 |
+| **P2** | **29** | 记录覆盖缺口（设计级，需新钩子）、`/co purge` 语义放大、文档与实际不符、发布链缺口 |
+| **P3** | **37** | 脆弱写法、文档漂移、工具链卫生、低危暴露面 |
+| 合计 | **84** | 其中 **11 条**是「上轮声称已修但实测/复核无效或未移植」（L1-01/L3-03、L1-02、L5-02、L5-03、L5-11、L5-06、L5-05、L4-04/L5-01、L3-07/F-9.1、F-9.2、L2-04/F-9.3） |
+
+按来源（未去重）：主代理自查 3（F-9.1 P1 / F-9.2 P3 / F-9.3 P1）、L1 18（P1 2 / P2 6 / P3 10）、L2 13（P1 3 / P2 7 / P3 3）、L4 20（P1 2 / P2 6 / P3 11 / 误报 1）、L3 21（P0 2 / P1 8 / P2 9 / P3 2）、L5 16（P1 2 / P2 4 / P3 10）= **91 条原始，去重后 84 条**。
+
+**去重映射（同一缺陷）**：L3-03 ≡ L1-01（`#container` 死变量）；L3-07 ≡ F-9.1（命令原文无脱敏）；L2-04 ≡ F-9.3（互斥窗口）；L4-04 ≡ L5-01（权限节点前缀不一致，同一条由两路独立报出）；L2-10 ≡ L4-03（`a:` 只过滤 `co_block`）；L2-12 ≡ L4-19（`maxBlocks` 实为每表 5000）；L1-08 ≡ L4-09（`/co status` 走无预算的 `countsSequential`）。**误报 1 条**：L4-02（见 9.4 R-9.1 的说明）。
+
+**必须优先修（建议顺序）**
+1. **P0-L3-01 活塞坐标**：`from = extending ? pos.offset(facing.getOpposite()) : pos`、`to = extending ? pos : pos.offset(facing)`；否则回档会把方块放到错位 1~2 格并清掉那里的方块。
+2. **P0-L3-02 `#fire` 窗口**：`FireBlockMixin` 的 `@At("TAIL")` → `@At("RETURN")`（两处：`tick` 与 `scheduledTick`）。
+3. **P1 数据可信度三连**：L1-02（行级写失败吞掉，`/co status` 应可见）、L3-09（限流丢弃不计数）、L3-08（聊天无限流）。
+4. **P1 回档正确性四连**：L2-01（容器阶段需在方块恢复之后）、L2-02（双箱按 54 格回放）、L2-03（`ejectInventory` 的 undo 要放回容器）、L3-05（容器被毁时先记内容）。
+5. **P1 安全**：L3-07/F-9.1（命令黑名单/脱敏）、L4-04/L5-01（权限节点前缀归一化）。
+6. **P1 一致性与钩子层次**：L5-02（26.1.2 告示牌钩子下移到 `updateSignText`）、L5-03（签名命令钩子下移到执行方法）、L1-01/L3-03（`#container` 死变量）、L3-04（双箱漏斗重复记账）、L3-06（活塞销毁方块无记录）、L3-10（漏斗快照开销）。
+
+### 9.3 发现清单
+
+#### 9.3.0 主代理自查（与五路并行，独立复核）
+
+**F-9.1 · P2 · 命令原文无脱敏入库：登录类明文密码可被查询**
+- 位置：`coreprotect-fabric-1.21.11/src/main/java/net/coreprotect/fabric/mixin/ServerPlayNetworkHandlerMixin.java:42-51,59`（`mod.database().insertCommandAsync(TimeUtil.now(), player.getGameProfile().name(), command)`）；读取侧 `command/LookupService.java:138` → `database/DatabaseManager.java:1158`（`queryMessages("co_command", …)`）。
+- 触发：任何玩家执行任何命令（含 `/login <密码>`、`/register <密码>`、`/msg <对象> <私聊>`）。
+- 影响：明文密码与私聊原文长期保存在 `co_command`；默认 `permissions.lookupLevel = 1`（moderator 及以上）即可 `/co lookup a:command` 读出。全仓库无命令过滤/脱敏（grep `login|register|password|secret|token|filter|blocklist` 未命中任何过滤实现）；`config/CoreProtectConfig.java:38` 的 `logging.command = true` 只能**整体关闭**命令记录，无法只忽略敏感命令。
+- 证据：代码路径确定（mixin → `insertCommandAsync` → `co_command` → lookup 直读原文）。
+- 建议：新增 `logging.commandIgnore`（前缀列表，默认含 `/login`、`/l`、`/register`、`/reg`、`/changepassword`、`/msg`、`/tell`、`/w`），命中则不入库；README 显著提示此类服务器应关闭 `logging.command`。
+- 可信度：**已证实**（代码路径）。
+- 上轮为何没发现：上轮只审「是否漏记」（完整性），未审「是否该记」（敏感信息）。
+
+**F-9.2 · P3 · `database.syncMode` 看似可热改，但 `/co reload` 不生效且无提示**
+- 位置：`database/DatabaseManager.java:574`（`applyPragmas` 只在建连接时执行 `PRAGMA synchronous=<config.syncMode>`）；`command/CoCommand.java:464-470`（`reload` 仅 `config().load()` + 翻译重载，不重开连接、不重设 PRAGMA）。
+- 触发：管理员把 `database.syncMode` 从 `full` 改为 `normal` 后执行 `/co reload`。
+- 影响：字段虽已 `volatile`（读得到新值），但写连接仍沿用旧值直到重启；`/co reload` 无任何提示，管理员会误以为已生效（持久性预期与实测不一致）。
+- 建议：`reload` 后把 `PRAGMA synchronous=…` 投递到 writer 线程执行；或在 `/co reload` 输出中明确「syncMode 需重启生效」。
+- 可信度：**已证实**（代码路径）。
+- 上轮为何没发现：上轮把配置字段改成 `volatile` 只解决「读得到新值」，未验证「新值是否真的被使用」。
+
+**F-9.3 · P1 · `/co rollback` 的互斥在「查询阶段」是空的：连发两次会并行执行并重复改世界**
+- 位置：`rollback/RollbackManager.java:220-289`（`startRollback`）：`isRunning(operator)` 在 `:225` 检查，但任务对象要到**查询回调内**才 `runningJobs.add(job)`（`:287`），两者之间隔着一次 `mod.database().submitRead(...)` 的完整查询（`queryBlocks` + `queryContainers` + `querySigns` + `queryItems` + `queryEntities`，`:236-270`）。
+- 触发：同一操作者在第一次回档的查询尚未返回时再执行一次 `/co rollback`（双击、宏、RCON 连发；控制台两次也互不阻塞，因为 `operator == null` 且都不在 `runningJobs` 里）。
+- 影响：两个 Job 会同时切片执行 —— 方块改写基本幂等，但**容器增删会被应用两次**（`reverseContainer` 的 add/remove 各跑一遍 → 物品凭空复制或凭空消失）；`publishUndo` 每次覆盖同名记录（`:425-431`），`/co undo` 最终只能撤掉其中一个（可能是被截断的那个）。在真实大库上 `queryBlocks` 的耗时是数百毫秒级，容易命中。
+- 证据：代码路径确定（`isRunning` → `submitRead` → 回调内才登记）；`runningJobs` 只在 `:287`/`:312` 加入、`:397`/`:323` 移除，没有「预留中」状态。
+- 建议：在 `startRollback` 的**调用线程**（服务器线程）先登记一个占位（如 `pendingOperators` 集合或先把 Job 加进 `runningJobs`、失败时移除），查询失败/超限时再释放；或把 `isRunning` 检查移到回调里并在此之前不回消息。
+- 可信度：**已证实**（代码路径）。
+- 上轮为何没发现：上轮加的互斥只覆盖了「已开始切片」的状态，没人验证「开始之前」的窗口；`isRunning(operator)` 的注释还专门写了 console 互斥，容易让人以为已覆盖。
+
+#### 9.3.0-b 已检查但无问题（主代理）
+- `purge` 覆盖全部 8 张日志表并清理字典：`database/DatabaseManager.java:141-142`（`COUNT_TABLES`）+ `:1324-1348`（`doPurge` → `gcDictionaries` → `invalidateDictionaries`）。
+- `applyPragmas` 读/写连接差异合理：读连接 `query_only=ON`、`synchronous=NORMAL`；写连接 `journal_mode=WAL` + 配置值；两路均 `busy_timeout=10000`、`temp_store=MEMORY`（`:559-579`）。
+- `command/ParamParser.java` 参数边界正确：`t:` 必须为正秒、`r:`/`p:` 上限 1000、未知 key 报 `invalid_param`、裸数字=页码。
+- 三棵树 `src` 内无硬编码密钥；外部端点只有 bStats 与 Modrinth（`util/BStatsMetrics.java`、`util/UpdateChecker.java`）。
+- bStats 端点正确：官方 `MetricsBase.REPORT_URL = "https://bStats.org/api/v2/data/%s"`（`%s` = platform，`server-implementation` 是合法值，见 https://github.com/Bastian/bStats-Metrics/blob/master/base/src/main/java/org/bstats/MetricsBase.java）；上报内容不含玩家名/IP（`util/BStatsMetrics.java:98-135`）。
+- 会话日志不记录 IP（`event/SessionEventListener.java:38-41,61-64`）；`event/MessageEventListener.java:14-21` 只订阅公共聊天。
+
+#### 9.3.1 L1 数据层（`database/DatabaseManager.java` 全 1854 行 + 查询/命令调用侧）
+
+| # | 级别 | 位置 | 问题与影响 | 我的复核 |
+|---|---|---|---|---|
+| L1-01 | **P1** | `container/ContainerTracker.java:154,163,174-180` | 「容器消失记匿名 `#container`」（v1.9.3 的 M5 修复）是**死代码**：`:163 user = "#container";` 之后 `:179` 仍传 `w.userName()`，`user` 从未被读取。容器被回档/爆炸替换、方块实体消失时，整箱差额仍记在开界面的玩家名下 → `/co lookup u:玩家`、`/co rollback u:玩家` 误伤无辜玩家（正是上轮想修的那类误判）。三棵树同源 | **✓ 亲自确认**（读 `:138-207`，`user` 只被赋值两次、无读取）；`javac` 不会告警 |
+| L1-02 | **P1** | `database/DatabaseManager.java:767-781` 及其余 7 个 `insert*Async` | 行级写失败被吞：`catch (Exception e) { LOGGER.error("Database write failed: co_block", e); }` 之后该行既不回队也不计入 `droppedWrites`，同批其余行照常 `commit()` → **静默丢日志**，`/co status` 的 dropped 仍显示 0。D1 的 requeue 只覆盖批次级 `commit()` 失败 | **✓ 亲自确认**（`:767-796`）；注意 `stateId/nameId/worldId` 在 try 外，抛错会走批次 requeue |
+| L1-03 | P2 | `command/CoCommand.java:450-460` + `DatabaseManager.java:1306,1485-1492` | `/co purge` 的 `execute()` 是 `worker.submit(task).get(60, SECONDS)`：超时后返回 null（**不取消任务**）→ 用户收到 `coreprotect.error.db`（文案还是 "database read failed"），但 DELETE 仍在跑/已删完；`rows == null` 使 `vacuumAsync()` 被跳过；`doPurge` 对 8 张表各自 auto-commit，中途崩溃留下「部分表已清、部分未清」 | **✓ 亲自确认机制**（`:1485-1492` + `:1324-1340`）；实际耗时取决于库大小 |
+| L1-04 | P2 | `DatabaseManager.java:1324-1375,676-695` | `DELETE` / `incremental_vacuum` / `VACUUM INTO` 全压在唯一 writer 线程 → 期间所有 `insert*` 只排队，队列满 65536 即丢行；备份还需同目录再放一份等大的 `.backup.tmp` | 采信（代码结构已确认：`purgeAsync`/`vacuumAsync`/`scheduleBackups` 都是 `worker.submit`） |
+| L1-05 | P2 | `DatabaseManager.java:278-291` | `open()` 失败只 `return`，`open` 保持 false，但监听器与 `/co` 命令照常注册 → 之后每行日志被丢（仅 WARN 首条与每 1000 条）、所有查询回 "database read failed"，无重试、无禁用提示、无 OP 告知 | **✓ 亲自确认**（`:278-291`） |
+| L1-06 | P2 | `DatabaseManager.java:1694-1721` | `conn.rollback()` 失败被吞 → 事务仍开；`finally` 的 `setAutoCommit(true)` 按 JDBC 语义会**隐式提交**，而同一批行又被重新入队 → 重复写行（重复记录、重复还原） | 采信（推理级，需 rollback 失败） |
+| L1-07 | P2 | `DatabaseManager.java:1703-1714` | 重试无上限、无降级：毒批次每秒重试一次 → 队列涨满 → 全丢；`/co status` 只能看到 queued/dropped 同涨，无「数据库不可写」状态 | 采信（推理级） |
+| L1-08 | P2 | `command/LookupService.java:80-87` + `DatabaseManager.java:1261-1273` | 控制台路径在 tick 线程 `future.get(10 s)`；`countsSequential` 是 8 个**无 deadline** 的串行 `COUNT(*)`（对比 `counts()` 有 20 s 预算）→ 大库上控制台先收 "still running"、再收迟到结果，且 tick 最长卡 10 s | **✓ 机制亲自确认**（`:80-87`、`:1261`）；是否超 10 s 未测 |
+| L1-09 | P3 | `DatabaseManager.java:1210,1218-1253` | 20 s 预算的 `counts()` 实际是死路径（唯一入口 `count(String)` 无调用者，`/co status` 走 `countsSequential`，见 `CoCommand.java:234`）→ `COUNTS_BUDGET_NANOS`/`cancel(true)` 形同虚设；`:1224` 的 `readPool.submit` 未捕 `RejectedExecutionException` | **✓ 亲自确认**（grep `counts(` 只有 `:1210` 内部调用，`count("co_` 无调用者） |
+| L1-10 | P3 | `DatabaseManager.java:1751-1755` | 关服 drain 丢弃时只打 WARN，不累加 `droppedWrites` → 面板与日志对不上 | 采信（与 b9 的 drain 改法一致） |
+| L1-11 | P3 | `DatabaseManager.java:704-744` | `PRAGMA wal_checkpoint(TRUNCATE)`（`:710`）在读池关闭（`:738`）**之前**执行；有读连接持有事务时返回 SQLITE_BUSY 并被吞 → `.db-wal` 留在磁盘，下次启动重放 | **✓ 亲自确认**（`:704-744` 顺序） |
+| L1-12 | P3 | `DatabaseManager.java:1446-1467` | `b:`/`e:` 的 `%`/`_` 未转义、无 `ESCAPE`：`b:_` 命中全部方块；`e:%` 排除全部行 → 回档报「0 块」却像成功 | **✓ 亲自确认**（`:1448-1466`）；仍是参数绑定，非注入 |
+| L1-13 | P3 | `DatabaseManager.java:118-119` | `co_entity` 只有 time/name 与 data 索引，**没有 `(wid_id,x,y,z)`**（其余 4 张日志表都有）→ 实体半径查询/`#kill` 全表扫 | **✓ 亲自确认**（DDL 对照） |
+| L1-14 | P3 | `rollback/RollbackManager.java:720-752` | 告示牌目标解析 N+1：在读池线程内逐坐标 `querySignHistory` → 500 个位置 = 500 次 SQL，同池其它查询排队 | 采信 |
+| L1-15 | P3 | `command/CoCommand.java:453-455` | purge 失败文案固定 "database read failed"，把写失败报成读失败 | **✓ 亲自确认**（同 L1-03 调用点） |
+| L1-16 | P3 | `DatabaseManager.java:1239-1250` | `cancel(true)` 的中断位可能被 sqlite-jdbc 的 `checkInterrupted()` 消费到同一读池线程的下一个查询 | 采信（推理级；当前是死路径） |
+| L1-17 | P3 | `DatabaseManager.java:440-452` | 迁移备份只 `Files.copy` 主库文件（checkpoint 可能 busy → 备份缺 WAL 事务），且 `if (!Files.exists(backup))` 使旧备份永不刷新 | 采信（推理级） |
+| L1-18 | P3 | `DatabaseManager.java:490` vs `:311-318,544-556` | `gcDictionaries` 在 `migrateV2ToV3` 内被调用，而 `DDL_V3` 建表在其后才执行 → 旧库若缺 `co_session/co_command/co_chat`，`UNION` 会 `no such table` → 迁移失败 → 叠加 L1-05 永久降级 | **✓ 结构确认**（`:311-318` 先迁移、`:490` 内 gc）；前置条件（v1 库是否缺表）待实测 |
+
+**L1 的「已检查但无问题」**（可直接引用，避免重复审）：① 全参数绑定无 SQL 注入；② 所有 `query*` 均 `ORDER BY <t>.id DESC LIMIT ? OFFSET ?`，id 唯一=全序，分页不重不漏；③ `gcDictionaries` 五组 UNION 单列对齐且全部带 `IS NOT NULL`（规避 `NOT IN (NULL)` 陷阱）；④ 字典 `INSERT … ON CONFLICT DO NOTHING` + `SELECT` 与 UNIQUE 约束匹配，缓存为 `synchronizedMap`；⑤ `readConnection()` 的 generation 失效机制正确；⑥ 读/写连接 PRAGMA 差异合理；⑦ `submitWrite` 的 `!open` 与 offer 失败都计数（唯一例外 L1-10）；⑧ writer 单线程不触碰 server 线程状态；⑨ `poolReader` 覆盖全部 `executeRead` 入口，无「池线程内再 submitRead 并阻塞」的嵌套（A1 修复完整）；⑩ `bind()` 三分支与占位符一一对应；⑪ 先删 LEGACY 索引再 `DROP COLUMN`；⑫ `-1 = n/a` 语义两端一致；⑬ `t:` 单位（秒）在 parse / 查询 / purge 三处一致；⑭ 关停有 30 s + deadline + `shutdownNow()` 兜底，不会挂死。
+
+**L1 的「存疑未证实」**：v1 旧库是否真缺 `co_session/co_command/co_chat`（U-9.3）；`saveLastOperations()` 未见 tmp+ATOMIC_MOVE（U-9.4）；`quickCheck()` 自动恢复前是否提示管理员/是否保留 `.corrupt-*`（U-9.5）；L1-06 需真实 rollback 失败复现；417k 库上 `countsSequential` 与 `purge` 的实际耗时未测。
+
+
+#### 9.3.2 L2 回档引擎（`rollback/RollbackManager.java` 1079 行 + `BlockStateUtil`/`ItemStackCodec`/查询过滤器）
+
+| # | 级别 | 位置 | 问题与影响 | 我的复核 |
+|---|---|---|---|---|
+| L2-01 | **P1** | `RollbackManager.java:457-552` | **回档先回放容器、后回放方块**：同一窗口内既有该容器的存取行、又有它的破坏行（「偷完东西再拆箱」）时，容器阶段先跑，此时方块已不存在 → `getBlockEntity` 不是 `Inventory` → `skipped++`，随后方块阶段只放回一个**空**容器，库存永久丢失，用户只看到 skipped 数变大 | **✓ 亲自确认**（`:457` 容器段在 `:504` 方块段之前；`:546` 只 `setBlockState`） |
+| L2-02 | **P1** | `RollbackManager.java:467,641,789` + `ContainerTracker.java:180,199` | **双箱只回放被点开那半的 27 格**：追踪侧用 `ChestBlock.getInventory(...,true)` 的合并 54 格算 delta（`CTA:199`），但写行时 pos 用玩家点开的那一半（`CTA:180`）；回放/undo 侧只取 `getBlockEntity(pos)` 的单个 `ChestBlockEntity`（27 格）→ 物品落在另一半时 rollback 的 `removeItems` 取 0 → skipped；restore/undo 的 `addItems` 塞不下就把物品掉在箱子旁 | **✓ 结构确认** |
+| L2-03 | **P1** | `RollbackManager.java:539-545,690-696` | **`ejectInventory` 的 undo 语义不完整**：rollback 把被替换容器的内容掉到地上并记 `WorldItemUndo(added=true)`；`/co undo` 先恢复方块（`stepUndo` 的 blocks 段在 worldItems 段之前，得到**空**容器），再对 `added==true` 只做 `removeDroppedItems`（把地上物品删掉），**从不放回容器** → 一次 rollback+undo = 容器变空 + 掉落物消失（H1 修了记录、没修反向语义） | **✓ 亲自确认**（`:621-634` 在 `:677-696` 之前；`:690-693` 只有 remove） |
+| L2-05 | P2 | `RollbackManager.java:520-538` | `#fire`/`#water` 行的 `expected` 是瞬态介质：烧成火的行 `expected=FIRE`，火熄灭后当前位置是空气，而介质消失的写入按设计被 `CoreProtectFabric:293-299` 过滤掉 → 链里没有把状态拉回来的行 → 该行永久 skipped（同一次火灾里「烧成空气」的分支可回档，「烧成火」的分支不能，行为不一致） | 采信（与 E2 的记录侧语义一致，回放侧未配） |
+| L2-06 | P2 | `RollbackManager.java:546,632` | 回档/undo 用 `Block.NOTIFY_ALL`（含 `NOTIFY_NEIGHBORS`）写入 → `WorldChunk.setBlockState` 无条件 `onBlockAdded`，`FallingBlock` 会 `scheduleBlockTick` → 沙/砂砾/铁砧等按坐标乱序恢复时塌落；该 tick 在切片之外执行，`expected` 校验看不到 | 采信（vanilla 语义已核对；实际塌落结果属推理） |
+| L2-07 | P2 | `RollbackManager.java:619-635` | `stepUndo` 替换方块前**没有** `ejectInventory`（C16 只加在 rollback 侧）→ undo 把当前位置的带库存方块换掉时，`WorldChunk.setBlockState` 先 `removeBlockEntity` 再 `onStateReplaced`，内容直接消失（无掉落、无记录、不计 skipped） | **✓ 亲自确认**（`:632` 之前无 eject） |
+| L2-08 | P2 | `RollbackManager.java:302-309,406-427,969` | undo 记录**先 remove 后执行**：`:302 lastOperations.remove(uuid)` 后中途失败/关服 → `publishUndo` 对 undo 任务直接 return（`:427`）→ 记录无法恢复，世界停在「撤了一半」；且 `Files.writeString` 原地截断非原子，JVM 被强杀时可能留下空/半截 JSON → 下次启动**所有玩家**的 undo 记录全丢 | **✓ 亲自确认** `:969` 非原子（U-9.4 升格）；`remove` 顺序见 `:302` |
+| L2-09 | P2 | `RollbackManager.java:529,546,632` | 切片内 `getBlockState`/`setBlockState` 对未加载区块会**同步加载/生成**区块（`World.getChunk(..., FULL, true)`），4 ms 预算形同虚设；半径回档可连续生成上千区块（主线程卡顿、磁盘暴涨）。全文件没有 `isPosLoaded` 判断 | 采信（vanilla 语义；未实测规模） |
+| L2-10 | P2 | `DatabaseManager.java:1400-1482` + `RollbackManager.java:238-258` | 与 L4-03 同源（**合并计一条**）：`a:` 只作用于 co_block（`appendBlockAction`），容器/告示牌/物品/实体查询完全不看 action → `/co rollback a:#kill` 会把同窗口的容器存取与告示牌编辑一起回档；`a:#chat` 等对 blocks 不追加条件 = 不过滤 | **✓ 结构确认**（合并到 L4-03） |
+| L2-11 | P2→P3 | `RollbackManager.java:504-552` + `CoreProtectFabric.java:346-383` | `#piston` 移动写成两条独立行（from: moved→AIR，to: AIR→moved），`r:`/`b:` 过滤可能只含其中一条 → 只回放 from 时目标位置仍留着被推过去的方块（复制），只回放 to 时凭空少一块 | 采信（机制确定；需要跨边界触发，降为 P3） |
+| L2-12 | P3 | `RollbackManager.java:222,239,261` | 与 L4-19 同源（**合并**）：`maxBlocks` 实为「每表 5000」，五张表各判一次 → 单次回档最多约 5×maxBlocks 改动量 | **✓ 结构确认** |
+| L2-13 | P3 | `RollbackManager.java:400,415,571` | 完成消息口径不一致：`/co undo` 只传 `blocksApplied`（不报物品）；`containerGroups` 是计划命中的位置数（全 skipped 也照报）；告示牌改动计入 `blocksApplied` | **✓ 亲自确认** |
+| L2-14 | P3 | `RollbackManager.java:233,276-278` + `DatabaseManager.java:1795-1800` | 先打「Rollback started」再可能因超限被拒；关服过程中提交时查询结果被静默丢弃（只有 LOGGER warn） | 采信 |
+
+**L2 的「已检查但无问题」**：restore/rollback 方块侧严格互逆；容器 restore 倒序（M3）正确；链式回放幂等（`current.equals(target)` 时不计 skipped）；`parseOrNull` 失败→skipped（C15）；`removeItems` 返回真实移动量不造物品（C1）；`ejectInventory` 已去掉 giveStack、控制台同样落地（H1）；物品匹配用 `areItemsAndComponentsEqual`；SNBT 往返成立（`UNCOUNTED_CODEC`/`CODEC` count 缺省 1，已核对 mc-sources `ItemStack.java:165`）；undo 持久化结构 version/UUID/四类全覆盖且读写字段对称；`SERVER_STOPPING→shutdown()` 确实接线（C6）；`submitRead` 回调经 `server.execute` 派发（无跨线程世界写入）；死亡掉落走三参 `dropItem`（`PlayerInventory.java:476`），不会被记成 `-item`；`+item` 拾取行不还原（C7）；`isRunning` 对 `operator == null` 互斥（H3）；purge 与回档无交互风险；job 内写入不产生自我污染。
+
+**L2 的「存疑未证实」**：多格方块（门/床/双高植物）在 `NOTIFY_ALL` 下乱序恢复可能自毁（同 L2-06）；两名玩家对同一区域并发回档（`isRunning` 只按操作者判重）且后到者的 undo 记录残缺；`removeDroppedItems` 的检索盒只有 1 格（`new Box(pos)`），物品被挤出后 undo 漏删；`t:` 缺省 7 天；告示牌只留纯文本（与上游一致）。
+
+#### 9.3.3 L4 命令 / 权限 / 配置 / i18n
+
+| # | 级别 | 位置 | 问题与影响 | 我的复核 |
+|---|---|---|---|---|
+| L4-01 | **P1**（原报 P0，我降级并说明理由） | `CoCommand.java:436-462` + `DatabaseManager.java:1324-1331` | **`/co purge` 静默忽略 `u:/a:/b:/e:/r:/p:`，只消费 `t:`**：`ParamParser` 解析出的这些字段从未被读取，`doPurge` 对 8 张表一律 `DELETE ... WHERE time < ?` → `/co purge u:Steve t:1d` 实际删掉**所有玩家**一天前的全部数据，不可逆、无确认、无备份，消息只报条数。降为 P1 的理由：README 只声明 `/co purge t:<时间>`、`PURGE_KEYS` 只提示 `t:`，属于「传了不支持的过滤器后被静默放大」而非文档行为失效；但后果不可逆，仍须优先修 | **✓ 亲自确认**（`:449 long before = c.time;` 之后直接 `database().purge(before)`；`PURGE_KEYS = List.of("t:")` 见 `:101`） |
+| L4-02 | —（**误报**） | 我复核后否定 | 报告称 `RollbackManager.java:237` 留有 `Thread.sleep(3000L) // TEMP-REPRO F-9.3`。实测：`grep TEMP-REPRO\|Thread\.sleep` 在 `coreprotect-fabric-1.21.11/src` 只命中 `DatabaseManager.java:1742` 的 `Thread.sleep(250L)`（D1 退避），**src 里没有任何 3 秒 sleep**；`git status --porcelain` 亦干净。原因是 L4 读取该文件的时间落在我的 F-9.3 实测窗口内（我 22:10–22:16 临时插入、随后 `git checkout --` 还原）。教训已记入 §9.5 | **✓ 已证伪** |
+| L4-03 | P2 | `RollbackManager.java:238-258` + `DatabaseManager.java:1469-1482` | 与 L2-10 同源（**合并**）：`a:` 只过滤 co_block；rollback 对五张表共用同一 `Criteria` 且不看 action → `a:#chat` 之类的回档会把方块、容器、物品、告示牌、实体一起回滚（各最多 maxBlocks），用户无法预期 | **✓ 结构确认** |
+| L4-04 | **P1** | `Permissions.java:96-100` vs `README.md:88-100` | **权限组节点名对不上**：README 教用户写 `coreprotect.help`/`coreprotect.lookup`/…，代码用 `node2.equalsIgnoreCase(node)` 与裸名（`NODE_PURGE = "purge"` 等）比较，除 `"all"` 外**永不匹配**；`CoreProtectConfig.load()` 对组内未知节点零校验零告警 → `permissionGroups` 功能整体静默失效（fail-closed，无提权） | **✓ 亲自确认**（读 `Permissions.java:62-102` 与 `README.md:82-102`） |
+| L4-05 | P2 | `CoCommand.java:392-400` + `ParamParser.java:42-44` | 「必须给过滤条件」守卫是死代码：`ParamParser` 在解析前就预填 `c.time = now - defaultTimeSeconds`，故 `c.time > 0` 恒真 → `coreprotect.error.missing_user` 不可达 → `/co rollback b:stone`、`/co restore e:Steve` 静默对**全体玩家**在默认 7 天窗口生效 | 采信（与我 b16 记录的「至少一个过滤」实现吻合，但未注意预填导致守卫失效） |
+| L4-06 | P2 | `Permissions.java:31-32,67` | 单个 `lookupLevel` 同时覆盖 help/status/inspect/lookup/online/language，且 `a:#chat`、`a:#command` 与方块同权限 → 无法「只给看方块、禁读聊天/命令」（而命令记录含 `/login` 明文密码，见 F-9.1）；默认 1 时普通玩家连 `/co help`、`/co language` 都拿不到；`coreprotect.error.permission` 是死键（无权限时 Brigadier 直接不匹配节点，玩家只看到原版 "Unknown or incomplete command"） | 采信 |
+| L4-07 | P2 | `CoCommand.java:464-470` + `CoreProtectConfig.java:298-309` | `/co reload` 无 try/catch、无条件报成功；`load()` 的 catch 只打 "... using defaults" 而赋值都在 `fromJson` 之后 → 实际保留旧值，日志撒谎；只有 `database.file` 有「需重启」提示，`cacheSizeMB/syncMode/batchIntervalMs/batchMaxRows/dataRetention` 改了无任何提示（其中 `syncMode` 确实只在建连接时生效，见 F-9.2） | 采信（与我 b16 的 F-9.2 一致） |
+| L4-08 | P2 | `CoCommand.java:511-576` | `/co debug natural` 在出生点造火/水/TNT 真炸，并对 9 个区块 `setChunkForced(..., true)` **只加不减** → forced chunks 随存档持久化；无清理命令；仅 adminLevel=4 门槛 | 采信（`setChunkForced` 是否持久化属存疑，见下） |
+| L4-09 | P2 | `CoCommand.java:234` + `DatabaseManager.java:1261-1273` | 与 L1-08/L1-09 同源（**合并到 L1-08**）：`/co status` 走无预算的 `countsSequential`，带 20 s 预算的 `counts()` 已成死代码 | **✓ 结构确认** |
+| L4-10 | P3 | `CoreProtectConfig.java:31,215` | D10 只修一半：`database` 字段加了 `volatile`，但 `load()` 是**整对象替换**（`volatile` 保护的是引用本身）；`lookup/rollback/permissions/permissionGroups/logging` 同理 | 采信 |
+| L4-11 | P3 | `CoreProtectConfig.java:194-215,306-309` | Gson 未知键静默忽略，拼错键零告警（`lookupLevel` 写到顶层、`permission_groups` 下划线写法等）；语法错误时保留旧值却打 "using defaults" | 采信 |
+| L4-12 | P3 | `LookupService.java:50-53` | 任意 `#xxx` 都当合法 action → `a:#contaner` 走 `#` 分支返 0 行并显示 "No results found"，与「真的没数据」不可区分 | 采信 |
+| L4-13 | P3 | `CoCommand.java:40-89,211-226` | 裸 `/co`、`/co rollback`、`/co purge`、`/co debug` 都回原版 "Incomplete command"（父节点无 `.executes`）；help 固定 12 行，不列 `/co i`、`/coreprotect`、`debug natural`，也不显示权限等级 | 采信 |
+| L4-14 | P3 | `DatabaseManager.java:997,1077,1179-1186` | `b:`/`e:`/`r:` 在容器/告示牌/聊天/命令/会话查询被静默忽略（`queryMessages` 只有时间+用户名，连 `r:` 都没有）；`e:` 一词两义（排除用户 vs 排除方块名），README 却并列 | 采信 |
+| L4-15 | P3 | `DatabaseManager.java:126,932,1387` | 语言偏好按玩家名存（`co_user(user TEXT PRIMARY KEY, language TEXT)`）→ 改名丢设置、离线模式同名继承 | 采信 |
+| L4-16 | P3 | `LookupService.java:89-90,155` + `RollbackManager.java:274,379` + `CoCommand.java:454` | 硬编码英文塞进 `{0}`（中文玩家看到「数据库错误：database read failed」）；`:89-90` 承诺「结果会写进服务器日志」对 RCON 不实；`Translator.format` 失败时回退当前语言的坏 pattern 而非 en_us | 采信 |
+| L4-17 | P3 | `ParamParser.java:79,88` | `r:`/`p:` 超限静默夹到 1000，无提示 → 管理员以为清过整个区域 | **✓ 与我们 v1.9.3 的 MAX_RADIUS/MAX_PAGE 实现一致** |
+| L4-18 | P3 | `CoCommand.java:252-270` | `/co status` 向 `lookupLevel`（默认 1）玩家暴露数据库绝对路径、11 个 logging 开关、权限组数量等运维信息 | 采信 |
+| L4-19 | P3 | `CoreProtectConfig.java:266-269` | 与 L2-12 同源（**合并**）：`rollback.maxBlocks` 只夹下界无上界，且是「单表」上限 | **✓ 结构确认** |
+| L4-20 | P3 | `README.md:218`、`OVERVIEW.md:126`、`OVERVIEW_EN.md:126`、`README.md:102` | 文档脱节：三处仍写「大型回滚在主线程执行（受 maxBlocks 上限保护）」，与 README:31 的「读线程池 + 4 ms 切片」自相矛盾；`README:102`「命令方块默认无权」只对 admin 级成立（命令方块 level 2 可跑 `lookupLevel=1` 的 `/co lookup`，含 `a:#chat`） | 采信 |
+
+**L4 的「已检查但无问题」**：`t:` 全边界（`TimeUtil.parseSeconds` 用 `Math.*Exact`，0/负/空→invalid_time）；`r:`/`p:` 非法值报错（除静默夹取）；未知键报 `invalid_param`；lookup 侧 `a:` 12 种写法分派正确；页脚 `p:` 封顶 + 仅满页输出；控制台/RCON 10 s 上限与补投路径；`sendRows` 用 `result.failed()` 区分失败与空；SQL 全参数化；权限基础行为（控制台/RCON level4、命令方块按自身权限、离线模式不按名字、`levelCheck` fail-closed、越界回落）；5 个语言文件各 118 键集合一致且占位符编号逐一匹配；`plain()` 剥 `§`/控制符覆盖 chat/command/sign；补全只查内存；`languageSet` 白名单；undo busy/empty 提示；`/co online` 行为。
+
+**L4 的「存疑未证实」**：MessageFormat 缺参行为（按 JDK 语义推断）；RCON 超时补投是否真丢；`setChunkForced` 是否持久化到 `level.dat`（若不持久化则 L4-08 降级）；`countsSequential` 真实耗时；命令方块实际 permission level；`co_user` 改名后旧记录清理；`maxBlocks` 很大时内存峰值；`buildLookupCommand` 用 `t:<secondsAgo>` 重建页脚导致翻页窗口随时间平移（与上游同行为）。
+#### 9.3.4 L3 日志采集（event / container / mixin / `CoreProtectFabric` 的 hook）
+
+| # | 级别 | 位置 | 问题与影响 | 我的复核 |
+|---|---|---|---|---|
+| L3-01 | **P0** | `CoreProtectFabric.java:369-370` | **活塞记录坐标整体错位**：`PistonBlockEntity` 的 `pos` 是**目标格**（`PistonBlock.java:300-304`：`blockPos3 = blockPos3.offset(direction); world.addBlockEntity(PistonExtensionBlock.createBlockEntityPiston(blockPos3, …))`），而 `from = extending ? pos.offset(facing) : pos.offset(facing, 2)`、`to = extending ? pos.offset(facing, 2) : pos.offset(facing)` 把 `pos` 当活塞本体 → 延伸偏 +2 格、回缩偏 +1 格。真实源格写入在 `PistonBlock.move()`（`onBlockEvent` 路径，不在 `#piston` 窗口内，`hookSetBlockState` 因 `cause == null` 直接 return），目标格写入的旧状态是 `MOVING_PISTON` 又被 `isPistonPart` 过滤 → **没有任何正确记录兜底**。后果：`/co lookup` 指错位置；`/co rollback` 会把方块放到错误位置并把那里的**无罪方块**清成空气 | **✓ 亲自确认坐标语义**（mc-sources `PistonBlock.java:300,303-304`）；修复公式：`from = extending ? pos.offset(facing.getOpposite()) : pos`、`to = extending ? pos : pos.offset(facing)` |
+| L3-02 | **P0** | `mixin/FireBlockMixin.java:29` | **`@At("TAIL")` 挡不住正常 return**：mixin 的 `TAIL` 只匹配方法**最后一个** return，`RETURN` 才匹配全部。`FireBlock.scheduledTick`（mc-sources `FireBlock.java:131-163`）在 `:157`（周围无可燃方块，最常见）、`:162`（age==15 且下方不可燃）各有一条正常 return → `NaturalBreakCause.clear("#fire")` 不执行；`set()` 同类只 `depth++`，之后每次合法 clear 只减 1、**永远回不到 0**，直到 5 s 看门狗（`NaturalBreakCause.pruneStale`）整窗丢弃。窗口内所有方块变化（含玩家破坏/放置）都被记成 `#fire` 自然行为 → 与玩家事件行**双记 + 栽赃** | **✓ 亲自确认机制**（`FireBlockMixin.java:26/33` 为 HEAD/TAIL；`NaturalBreakCause.set` 的 depth 逻辑见 `NaturalBreakCause.java:100-107`）；修复：改成 `at = @At("RETURN")` |
+| L3-03 | P1 | `container/ContainerTracker.java:154,163,179` | 与 **L1-01 同源（合并）**：M5 的 `#container` 署名修复是死变量，`insertContainerAsync` 仍传 `w.userName()` | 与 L1-01 一致 |
+| L3-04 | P1 | `container/HopperTracker.java:60-62,76-85` | **双箱被两个漏斗各记一份**：HopperTracker 用查询坐标做 key（`wid + "|" + x,y,z`），而 `HopperBlockEntity.getInventoryAt` 对双箱返回**合并 54 格**（mc-sources `HopperBlockEntity.java:373`）→ 两半各有一条基线、内容相同，同一笔变动被两个 key 各写一条 `#hopper` 行 → `/co rollback` 按行累加后物品凭空多/少（红石农场成倍错账） | 采信（机制清楚；C11 只修了玩家侧 `containerAt`，漏斗侧没处理） |
+| L3-05 | P1 | `event/BlockEventListener.java:43-56` + `CoreProtectFabric.java:332` | **容器被破坏时内容不上账**：苦力怕/TNT 炸掉、玩家挖掉、活塞推掉装有物品的箱子/木桶/潜影盒/熔炉时只写方块行（`insertBlockAsync(new BlockLog(…))` / `naturalLog(…)`），没有任何 `co_container` 行；`ContainerTracker` 只在 `onScreenClosed`/`onDisconnect`/`onDeath`/`finalizeAll` 时 diff → `/co rollback` 只能恢复出**空箱**，掉落物被岩浆/漏斗吃掉则彻底无痕 | 采信 |
+| L3-06 | P1 | 无钩子（原版 `PistonBlock.java:283-295`） | 活塞推不动的方块（花/红石线/铁轨/告示牌）被就地销毁（`dropStacks` + `setBlockState(pos, AIR, NOTIFY_LISTENERS \| FORCE_STATE)`），发生在 `PistonBlock.move()` 里、不在 `#piston` 窗口内 → 无任何记录，`/co rollback` 救不回 | 采信 |
+| L3-07 | P1 | `mixin/ServerPlayNetworkHandlerMixin.java:59` + `DatabaseManager.java:859` | 与 **F-9.1 同源（合并）**：命令原文（含 `/login` 明文密码）直接 `INSERT INTO co_command(time, name_id, message)`，无黑名单/脱敏；`lookupLevel` 默认 1 即可读别人的密码 | 与 F-9.1 一致 |
+| L3-08 | P1 | `event/MessageEventListener.java:17-20` | 聊天**没有限流**（`allowPacketLog` 只挂在命令与告示牌上）→ 刷屏客户端可每 tick 一条把写队列（65536）打满，`countDropped` 丢的是**所有**记录；也没有长度截断 | 采信 |
+| L3-09 | P1 | `CoreProtectFabric.java:222-239` | 包钩子限流（60 条/分钟/人）**静默丢弃**：`return false` 后调用方直接不记，不计入 `droppedWrites` → `/co status` 看不到，事后无法区分「没做过」与「被限流丢了」；且命令与告示牌共享同一配额（疯狂改告示牌会挤掉命令记录） | **✓ 亲自确认**（`CoreProtectFabric.java:222-239` 的 `allowPacketLog` 只 WARN 一次，无计数） |
+| L3-10 | P1 | `container/HopperTracker.java:76,82,100` + `ContainerTracker.java:216` | **每漏斗每 tick 最多 3 次全量快照 × 每栈 SNBT 编码**：`HopperTracker` 每 tick 调三次 `diffAndLog`（每次 `snapshot` 全容器遍历），`ContainerTracker.snapshot` 每个非空栈调一次 `ItemStackCodec.encodeIdentity`（内部每次新建 `RegistryOps.of(...)` + `UNCOUNTED_CODEC.encodeStart` + `toNbtProviderString`），写入后还要 `rebaseline` 再全量快照一次。满格 54 格双箱贴两个漏斗 ≈ 每 tick 324 次编码，全在主线程 → MSPT/GC 放大器 | 采信（代码路径确定；MSPT 未测） |
+| L3-11 | P2 | `util/BlockStateUtil.java:68-78` + `CoreProtectFabric.java:385-392` + `RollbackManager.java:547` | 告示牌只存**正面**（`sign.getFrontText()`），背面丢弃；自然破坏的 `naturalLog(..., meta=null)` → 火烧/炸毁的告示牌回档成空白牌；而 `signLinesToJson` 已支持 `"side"` 字段，写入侧没用 | 采信 |
+| L3-12 | P2 | 无钩子（原版 `FallingBlockEntity.java:96,194`） | 重力方块（沙/砾/混凝土粉/铁砧/龙蛋）掉落：`spawnFromBlock` 清源格与落地 `setBlockState` 都在任何 cause 窗口之外 → 源格与落点均无记录 | 采信 |
+| L3-13 | P2 | 无钩子（`BedBlock.java:95,98` / `RespawnAnchorBlock.java:148`） | 床两格、重生锚自身那格在 `createExplosion` **之前**就被 `removeBlock`（不在爆炸窗口内）→ 爆炸回档救不回这几格 | 采信 |
+| L3-14 | P2 | 无钩子（原版 `FarmlandBlock.java:104-119`） | 玩家/生物落地踩踏耕地 → `setToDirt` 直接 `setBlockState`，无 cause、无事件 → 常见 grief 无法回滚（连带被顶走的作物也无记录） | 采信 |
+| L3-15 | P2 | 双格结构另一半（`TallPlantBlock.java:126`、`BedBlock.java:189`、`DoorBlock`） | 破坏事件只报被点那格，另一半由 `setBlockState`/邻居更新移除（`SKIP_DROPS`）→ 高草/门/床回档后剩半格 | 采信 |
+| L3-16 | P2 | 事件注册全集（仅 9 处） | 无 `UseEntityCallback`/`AttackEntityCallback`：箱子矿车/漏斗矿车/船/驴驮箱/展示框/盔甲架/讲台里的物品，以及这些实体被拆/点燃，全部无痕 | 采信 |
+| L3-17 | P2 | `mixin/ItemEntityPickupMixin.java:75-79` | 拾取行（`+item`）不带 NBT（10 参构造器，nbt 缺省 null；对比 `PlayerEntityDropMixin.java:40-45` 写了 `encodeIdentity`）→ 回档「同 id 白板物品」，附魔书/改名物品/潜影盒内容丢失 | 采信（与 C5/E8 的改造不一致） |
+| L3-18 | P2 | 无钩子（15 项 mixin 里只有 `LeavesBlockMixin` 注入 randomTick） | 冰/雪融化、铜氧化、珊瑚失活、草方块退化等随机刻变化无记录 → 回档后无法复原，也难与人为破坏区分 | 采信（未逐类核对 randomTick） |
+| L3-19 | P2 | `container/ContainerTracker.java:131-142` | 多人同开一个容器：A 先关时 `diffAndLog` 汇总了「开界面以来」的全部变化（含 B 做的），随后 `rebaselineAt` 把 B 的基线刷成当前值 → B 关界面时自己的操作不再产生记录（错记到 A + B 无记录） | 采信 |
+| L3-20 | P3 | `mixin/ServerPlayNetworkHandlerMixin.java:42-51` | 非玩家来源命令（控制台/RCON/命令方块/datapack）**完全不记录**：`coreprotect$logCommand` 从 `ServerPlayNetworkHandler.getPlayer()` 取玩家，控制台路径不经此 mixin → `/op`、`/ban`、`/co rollback` 的发起者不可查 | 采信 |
+| L3-21 | P3 | `DatabaseManager.java:859,872` | `co_command`/`co_chat` 没有 world 列 → 多世界服务器无法按维度检索聊天/命令，与 `co_block` 的 `wid_id` 设计不一致 | 采信 |
+
+**L3 的「已检查但无问题」**：`WorldMixin` 4 个注入点覆盖 1.21.11 全部写方块入口（2 个 `setBlockState` 重载 + `removeBlock` + `breakBlock`，低阶重载都委托高阶）；`ExplosionImpl.explode()`、`FlowableFluid.flow`、末影人两个 Goal、`PistonBlockEntity.tick`、`LeavesBlock.randomTick` 均为单出口/顺序体，`#explosion`/`#water`/`#enderman`/`#piston`/`#decay` 窗口不泄漏（`#decay` 走 `hookBreakBlock`，可记录）；`PISTON_LOGGED` 的 WeakHashMap 去重有效；`insert*Async` 主线程只构造对象 + `trackUser`（纯内存、跳过 `#` 前缀、上限 100），字典 id 在写线程解析；`flushWrites` 失败整批回滚 + drain 回队不丢行；玩家侧双箱已由 `containerAt` 合并 54 格 + `rebaselineAt` 的 `DoubleInventory.isPart` 映射处理。
+
+**L3 的「存疑未证实」**：三棵树未 diff（L3-01/02/17 需在 1.21 与 26.1.2 复验，同源极可能同病）；26.1.2 的 `setBlock` 重载数未核；`PistonBlock.onBlockEvent` 与 BE tick 是否可能重叠只是源码推断；L3-06/L3-13 未构造运行用例；`lookupLevel` 调 0 时的泄露面未实测；`pruneStale` 会掩盖「泄漏发生频率」这一诊断信号。
+
+#### 9.3.5 L5 移植差异 / 工具链 / 文档一致性
+
+| # | 级别 | 位置 | 问题与影响 | 我的复核 |
+|---|---|---|---|---|
+| L5-01 | P1 | 三树 `util/Permissions.java`（1.21:92 / 1.21.11:97 / 26.1.2:97）+ 根与三树 `README.md`/`OVERVIEW*.md` | **文档要求的权限节点名前缀与代码不一致**：文档教写 `"coreprotect.help"`、`"coreprotect.rollback"`，代码只匹配裸名（`NODE_HELP = "help"`，`node2.equalsIgnoreCase(node)`）→ 按文档配置的权限组一个节点都不匹配，玩家静默回退到 OP 等级判定；只有默认 `"all"` 生效，所以问题从未暴露 | **✓ 亲自确认**（`Permissions.java:18-29` 全裸名 + `:97` 比较；`README.md:90-94,101` 全带前缀）；建议在 `has()` 里 strip `coreprotect.` 前缀（一处改动修三树，不必改 6 份文档） |
+| L5-02 | P1 | `coreprotect-fabric-26.1.2/src/main/java/net/coreprotect/fabric/mixin/ServerPlayNetworkHandlerMixin.java:60-62` | **告示牌钩子挂错层**：26.1.2 钩的是包入口 `handleSignUpdate(ServerboundSignUpdatePacket)` 的 RETURN，而该方法只做 `filterTextPacket(...).thenAcceptAsync(...)` 排队后立即返回；真正写入在私有 `updateSignText`（`ServerGamePacketListenerImpl.java:2006`，内含 `hasChunkAt`/`instanceof SignBlockEntity` 守卫）。后果：未加载区块、方块实体不是告示牌也各记一条 `co_sign`，且记录早于写入；该文件 javadoc 还自称「only a sign the server really rewrote are recorded」→ **上轮 B8 在 C 树被回退** | 采信（L5 附了 mc-sources 26.1.2 的 `:2001`/`:2006` 行号）；修复：改钩 `updateSignText` |
+| L5-03 | P2 | A/B `ServerPlayNetworkHandlerMixin.java:47-49`、C `:45-47` | **签名命令钩子也挂错层**：三树都钩包入口（yarn `onChatCommandSigned` / mojmap `handleSignedChatCommand`）的 RETURN，真正执行在 `handleCommandExecution(ChatCommandSignedC2SPacket, LastSeenMessageList)` / `performSignedChatCommand(...)`；入口 RETURN 时 last-seen 校验失败会 `disconnect(CHAT_VALIDATION_FAILED)`、或 `tryHandleChat` 只是 `server.execute(...)` 排队 → **幻影 `co_command` 行**（未执行的命令被记录）且与命令自身日志乱序。旁证：未签名路径三树都钩动作方法（yarn `executeCommand`、mojmap `performUnsignedChatCommand:1491`），只有签名路径错层 → 上轮 §8.5 的补丁方向错 | 采信；修复：改钩动作方法 |
+| L5-04 | P2 | 根 `README.md:25,28,30,32`、根 `OVERVIEW.md:49,69,78,89,92,95`、根 `OVERVIEW_EN.md` 同；根因 `.build-tools/bump-version.ps1:13-23` | 仓库根三份文档版本停在 **1.9.1**（树内已是 1.9.3），因为 bump 脚本只改树内文档 → 每版必漂移；Modrinth `wiki_url` 正指向该 README | 采信（发布时未核对根文档） |
+| L5-05 | P2 | `coreprotect-fabric-1.21.11/{README.md:37,OVERVIEW.md:107,OVERVIEW_EN.md:107}` + 根文档同段 + `.build-tools/modrinth/body.md:88,191` | 文档写 Loader **≥0.16**，而 `fabric.mod.json` 要求 **≥0.19.3**（26.1.2 树文档已正确写 0.19）→ 按文档装旗舰 jar 会被 loader 硬拒；F19 只改了 manifest，文档没跟上 | 采信 |
+| L5-06 | P2 | `.build-tools/test-cp.ps1:16`（`test-migrate:14` / `test-probe:12` / `test-quick:13` / `test-russian:16` 同）vs `test-full.ps1:12-17,26` | **F11 只修了 `test-full.ps1`**：其余 5 个测试脚本仍用未校验的 `-WorkDir` + 通配 `-like "*$WorkDir*"` 杀 java（`Stop-Process -Force`）→ 传错参数可能杀掉无关进程 | 采信 |
+| L5-07 | P3 | `.build-tools/modrinth/body.md:80-82,183-185` | Modrinth 项目页正文仍写 `-1.9.2.jar`；`publish.ps1 -UpdateProject` 会把它推到线上 | 采信 |
+| L5-08 | P3 | 三树 `OVERVIEW.md:105,128`、`OVERVIEW_EN.md:105,128`、树 `README.md:221` | 文档称 `defaultRequire: 0`（best-effort），而三树 `coreprotect.mixins.json` 实为 `1` → 事实相反（钩子失效＝开服失败）；旧树 1.21.2/26.2 确是 0，文档没跟上 | 采信 |
+| L5-09 | P3 | `coreprotect-fabric-26.1.2/.../mixin/FireBlockMixin.java:18,25` | 26.1.2 里唯一不带方法描述符的 `@Inject(method = "tick")`（当前 `FireBlock` 只有一个 tick，能命中；将来加重载会 `defaultRequire:1` 直接开服失败） | 采信 |
+| L5-10 | P3 | 三树 `README.md:22,205` vs `OVERVIEW.md:49`/`OVERVIEW_EN.md:49` | 同树自相矛盾：README 说「手持方块右键（不放置方块）」（=代码行为），OVERVIEW 说「放置方块」→ 用户可能以为放置已被记录 | 采信 |
+| L5-11 | P3 | `DatabaseManager.close()`：1.21 `:709→712`、26.1.2 `:709→712` vs 1.21.11 `:708→710` | §8.4 记为「已知残留」的 WAL 顺序修复（先 `closeStatements()` 再 `wal_checkpoint(TRUNCATE)`）**未移植到 1.21 与 26.1.2** | 采信（与 E/A3 同源） |
+| L5-12 | P3 | `.build-tools/modrinth/publish.ps1:289-304` | 只校验 version_number / jar 内版本 / 源文件新鲜度 / SHA，**不校验 `game_versions` 与 jar 内 `fabric.mod.json` 的 `minecraft` 范围一致** → 可能给 1.21 的 jar 标 1.21.11 | 采信 |
+| L5-13 | P3 | `.github/workflows/build.yml:66` | `if grep -rlP …`：grep 退出码 2（自身错误）被当作「无匹配」→ ASCII 门禁 **fail-open**；另未加 gradle wrapper-validation | 采信 |
+| L5-14 | P3 | `.build-tools/` 无 `release-v193.ps1`（最新仍是 `release-v192.ps1`） | v1.9.3 已发布但没有对应脚本；v181/v182/v190/v191 都有 `-AllowHistoricalRerun` 保护，唯独 v192 是「活」脚本 → 下个版本发布者容易改错 | 采信 |
+| L5-15 | P3 | `.build-tools/modrinth/versions.json` 的 `environment` 字段 | `publish.ps1` 从不发送 environment（注释：带了会 405）→ 死数据，读者误以为生效 | 采信 |
+| L5-16 | P3 | `.build-tools/modrinth/probe5.ps1:88`、`probe6.ps1` | 脚本会**真的在 Modrinth 上创建版本**（仅注释提醒手工删），属发布链之外的活跃危险面 | 采信 |
+
+**L5 的三树等价性清单（40 文件全量 numstat + 逐 hunk 语义核对）**
+- 完全等价（纯改名）：`RollbackManager`（含 M6 `setItem` 槽位写回）、`LookupService`（1.21 与 1.21.11 逐字节相同）、`ContainerTracker`、`Inspector`、`BlockEventListener`、`Dispenser/HopperTracker`、`EntityEventListener`、`SessionEventListener`、`Translator`、`Messages`、`BlockStateUtil`、`TimeUtil`、`Criteria`、`NaturalBreakCause`、`BStatsMetrics`、`UpdateChecker`、`ParamParser`、`CoreProtectConfig`、`ItemStackCodec`。
+- 必要差异（版本 API）：`isInBuildLimit`(1.21)/`isInLoadLimit`(1.21.11)/`isInValidBounds`(26.1.2) 强度相同（**§8.4 说「语义略弱」不准确**，可更正）；`Permissions` 三种写法等价；`ExplosionMixin` `affectWorld(Z)` vs `explode()I`；`PlayerEntityDropMixin` 描述符 3 形态；`ItemStackCodec` 的 `CODEC`+`copyWithCount(1)`（`count:1` 不影响解码/匹配，数量一律取 DB `amount`）；`CoCommand.debugNatural` 在 C 树改为下一 tick 放置（仅调试命令）；26.1.2 用 `implementation` + `release=25`/`JAVA_25`（mojmap + Java 25 必需）。
+- 疑似遗漏已单独立项：C 树告示牌钩子（L5-02）、三树签名命令钩子（L5-03）、A/C 的 `close()` 顺序（L5-11）、C 树 `FireBlockMixin` 描述符（L5-09）。
+
+**L5 已检查且无问题**：40 文件 numstat 全表与全部 B-C hunk 语义；15 个 mixin 注入点与 1.21.11/26.1.2 源码逐一对齐（`DispenserBlockMixin:23,31`/`DropperBlockMixin:20`/`LeavesBlockMixin:18,25`/`PistonBlockEntityMixin:23,30`/`WorldMixin:28,35,42,49`/`HopperBlockEntityMixin:18`/`ServerPlayerEntityMixin:14`/`ItemEntityPickupMixin:38,53`/`PlayerEntityDropMixin:27` 描述符全部正确）；`coreprotect.mixins.json` 三树 15 项一致；`MOD_VERSION="1.9.3"` 三树一致；5 语言 × 3 树 = 918 键全 118 且占位符零不匹配；`gradle.properties`/jar 命名/`versions.json` 三方一致；`release-v192.ps1` 的 draft→上传→删旧 asset→发布顺序可重入；`new-version.ps1` 路径守卫；`.gitignore` 覆盖（`token.txt`/`*.pat`/`coreprotect.db*`/`payload-*`/zip/jdk）；63 个被跟踪脚本零非 ASCII；`README.md:14` 的 12 个节点与 `Permissions.java:18-29` 一致；bStats 33739、`batchIntervalMs=250`/`batchMaxRows=1000`、schema v3 索引、config 全部键名/默认值/clamp 与树 README §105-153 一致、命令表与 `CoCommand:41-92` 注册项及分级一致。
+
+**L5 的 F1–F19 回归核查**：仍正确的 17 条（F1/F2/F3/F4/F5/F6/F7/F8/F9/F10/F12/F13/F14/F15/F16/F17/F18/F19 的 manifest 部分）；**不完整或被回退**：F11（只修 1/6 脚本 → L5-06）、F19 的文档部分（→ L5-05）、B8 在 26.1.2（→ L5-02）、§8.5 签名命令补丁（→ L5-03）、§8.4 WAL 顺序（→ L5-11）。无「校验过严拦正常发布」的证据。
+
+**L5 的存疑未证实**：26.1.2 `FireBlockMixin` 无描述符当前能命中（`FireBlock.java:134` 只有一个 tick），未来重载增多未实测；5 个 `test-*.ps1` 用固定端口 25575/25577 + `rcon.password=testpass`，并行会端口冲突（未实测）；`versions.json.environment` 与 Modrinth 审核队列的关系（既存队列，未复核线上）；1.21 树 `isInBuildLimit` 的 ±30M 与 `isInLoadLimit` 的 `ChunkPos.isLoadable` 边界相同，1.21 多一道过滤属 over-filter（未实测）。
+
+
+### 9.4 实测复现记录
+
+- **R-9.1 · F-9.3 的实测确认（复现成功，1.21.11，2026-11-14 22:16）**：临时在 `rollback/RollbackManager.java` 的 `submitRead` lambda 首行插入 `Thread.sleep(3000L)`（标记 `TEMP-REPRO F-9.3`），用 `gradle runServer`（Gradle 9.7.1 + jdk-21.0.12.1+1、`run/` 复用旧库、RCON 25575/`testpass`）连发两条 `co rollback t:2h`（间隔约 1 s）。**结果**：两条都回 `CoreProtect - Rollback in progress, this may take a moment...`，**没有出现 `coreprotect.error.busy`** → 证明第一次命令还停在查询阶段时，第二次没有被互斥拦住；随后用 `git checkout -- <RollbackManager.java>` 还原、`git status --porcelain --untracked-files=no` 只剩 `.build-tools/audit/AUDIT-NOTES.md`。
+  - 说明：测试库当时为空（`co status` 全 0 行），所以看不到「容器物品被应用两次」的直接后果；该后果由 `RollbackManager.java:236-289` 的代码路径推得（两 Job 各自 `stepRollback`）。
+  - 复现脚本：`.dsh-scratch/repro-race.ps1`（未跟踪，不入库）；日志 `.dsh-scratch/repro-race-log.txt`。
+  - **过程中的副作用（重要）**：L4 子代理恰好在我保持着这段临时代码时读取了 `RollbackManager.java`，于是把 `Thread.sleep(3000L) // TEMP-REPRO F-9.3` 报成「发布版留有调试脚手架」（L4-02）。复核：`grep TEMP-REPRO|Thread\.sleep` 在 `coreprotect-fabric-1.21.11/src` 只命中 `DatabaseManager.java:1742` 的 `Thread.sleep(250L)`（D1 退避），src 无任何 3 秒 sleep，`git status --porcelain` 干净 → **L4-02 是误报**。教训：做实测时要么在独立 worktree/副本里改，要么事先告知并行的审查者「这段时间的 src 不代表发布状态」。
+
+### 9.5 未证实 / 推理级条目
+
+- **U-9.1 · bStats `serviceId` 归属存疑**：`config/CoreProtectConfig.java:114` 默认 `serviceId = 33739`、`metrics.enabled = true`。若该 id 并非本项目在 bstats.org 注册的 id，则本模组的统计会记在别的项目名下（数据归属错误），且服务器会在不知情的情况下持续上报。离线无法核实（bStats 无公开按 id 反查的接口）；建议作者确认，或在无法确认时默认 `0`（即关闭）。
+- **U-9.2 · `NaturalBreakCause` 去重记忆只保留最近一次**：`util/NaturalBreakCause.java:51-77` 的 `alreadyLoggedBreak`/`alreadyLoggedSet` 只记 `lastBreakPos/lastBreakOld` 与 `lastSetPos/lastSetOld/lastSetNew`。同一 cause 窗口内、同一坐标若出现两次 `setBlockState(pos, air)` 且中间未经过 break 钩子（`lastBreakOld` 仍停留在第一次的旧状态），第二次会被误判为重复而漏记。未构造出真实 vanilla 调用序列，标记为推理级。
+- **U-9.3 · v1 旧库是否缺表**（L1）：`migrate()` 只从 v2 迁到 v3；v1 库缺 `co_container`/`co_sign`/`co_entity` 等表时是否会被 `CREATE TABLE IF NOT EXISTS` 补齐、旧数据能否读，未实测。
+- **U-9.4 · undo JSON 非原子写**（L1，已由我复核确认写法）：`RollbackManager.saveLastOperations()` 用 `Files.writeString(path, root.toString())`，进程被 kill 于写入中途可留半个 JSON；下次启动 `loadLastOperations()` 解析失败的处理分支未实测（`RollbackManager.java` 的 `readLastOperations`）。
+- **U-9.5 · `quickCheck()` 自动恢复**（L1）：`DatabaseManager` 启动时的 `PRAGMA quick_check` 若判定损坏并自动恢复，是否会保留 `.corrupt-*` 备份文件并告知管理员，未实测。
+- **U-9.6 · 三棵树未逐条 diff L3 的钩子类条目**（L3）：L3-01/L3-02/L3-17 在 1.21 与 26.1.2 上「同源极可能同病」，但未逐文件确认（L5 的三树 numstat 显示这些文件等价，间接支持）。
+- **U-9.7 · 26.1.2 `FireBlockMixin` 无方法描述符**（L5）：当前 `FireBlock` 只有一个 `tick` 能命中；将来 MC 增加重载时的失败形态（`defaultRequire:1` → 开服崩溃）未实测。
+- **U-9.8 · `test-*.ps1` 端口固定**（L5）：5 个测试脚本都用 25575/25577 与 `rcon.password=testpass`，两脚本并行会端口冲突，未实测。
+- **U-9.9 · `publish.ps1` 的 stale 检测对 `-P` 覆盖参数无效**（L5）：比较 `src/**`+`build.gradle`+`gradle.properties` 与 jar 时间戳，若构建时用 `-P` 覆盖版本则检测可能失效，未验证。
+- **U-9.10 · 1.21 树 `isInBuildLimit` 的 over-filter**（L5）：1.21 原生 `setBlockState` 不拒水平越界，该树多一道 ±30M 过滤，属「行为等价但更严」，边界用例未跑。
+- **U-9.11 · 自然变化覆盖率**（L3）：`randomTick` 类变化（冰/雪融化、铜氧化、珊瑚失活）未逐类核对，L3-18 只给了类目而非穷举。
+
+### 9.6 与上一轮对照：为什么上次没发现
+
+上一轮修完 60 条 + 复查轮 15 条后，这一轮又找出 84 条。归纳成 6 个系统性原因（每条都对应本轮的条目）：
+
+1. **只审「有没有记录」，没审「记的对不对、该不该记」**。上轮 P0/E1/E2 全在抓「漏记」，于是没人看 `hookSetBlockState` 的**坐标算术**（L3-01 活塞 `pos` 语义）、也没人问「窗口的关闭点是不是覆盖了所有 return」（L3-02 的 `TAIL` vs `RETURN`）、更没人问「命令原文该不该原样入库」（L3-07/F-9.1）。这三条都是「记录点选错」而非「没有记录点」。
+2. **修复的验收口径是「存在一个实现」，不是「所有同类实例都排查过」**。F11 只加固了 `test-full.ps1`（还有 5 个同形脚本 → L5-06）；F19 只改了三份 manifest（文档仍写 0.16 → L5-05）；B8 只在 yarn 树改了告示牌钩子（26.1.2 回退 → L5-02）；§8.5 给签名命令补了钩子但没核「钩在入口还是动作点」（→ L5-03）；§8.4 把 WAL 顺序列为「已知残留」后就再没进待修清单（→ L5-11）。
+3. **文档与代码从未做「字符串值级」对照**。配置键名/默认值/范围都核过（所以 118 键、clamp 区间全对），但**权限节点是字符串值**：文档教 `coreprotect.help`、代码只认 `help` → 权限组特性整体静默失效（L4-04/L5-01）。根目录三份文档的版本号停在 1.9.1（L5-04）、`defaultRequire` 文档写 0 代码是 1（L5-08）也属同类：文档被当成「叙述」而不是「契约」。
+4. **只验证「新值读得到」，不验证「新值真的被使用」**。D10 把 `Database` 字段改成 `volatile` 解决了可见性，但没人验证 `PRAGMA synchronous` 是否随 `/co reload` 重设（F-9.2）。
+5. **互斥只覆盖了「已经开始的」状态**。上轮加的 `runningJobs` 去重只在切片启动后生效，`startRollback` 与首次 `runningJobs.add` 之间隔着 5 个查询（F-9.3）；同理 M5 的 `#container` 署名修复写了却没人检查变量是否被读取（L1-01/L3-03 的死代码）。
+6. **并行审查被我的临时补丁污染**。我为 F-9.3 做实测时在 `RollbackManager.java` 里插了 `Thread.sleep(3000)`，L4 恰好在这段时间读文件，于是报了「发布版留有调试脚手架」（L4-02 误报）。教训已记入 9.4：实测要么在独立 worktree，要么先声明时间窗。
+
+**结论**：上一轮是「按清单修」，这一轮是「按不变量查」。凡是「一个函数的所有出口」「一个字符串值在文档与代码两侧」「一个修复的所有同类实例」这类**全称命题**，上一轮都没有系统化覆盖。
+
+### 9.7 代码类遗留项核查
+
+用户在澄清阶段点名要求「代码类遗留项一并核查」（v1.9.3 §8.5 的 known gaps）。逐项结论：
+
+| 遗留项 | 核查结论 | 证据 |
+|---|---|---|
+| sqlite-jdbc 3.50.2.0 兼容 | **未发现不兼容**：三棵树本轮的 `test-full.ps1` 全绿（建库、迁移、批量写、`/co purge`、`/co rollback`、`/co undo`、`co status` 全过），未见 `SQLException`/`UnsupportedOperationException`；但没有针对 JDBC 的专项用例，判定为「弱证据通过」 | 三棵树 `FULL_TEST_DONE`、`MIXIN_FAILURES: no` |
+| B8 包钩子限流 | **仍有缺陷**：`allowPacketLog` 的丢弃既不计数也不写进 `/co status` → 已升级为 **L3-09（P1）**；且聊天路径完全没有限流 → **L3-08（P1）** | `CoreProtectFabric.java:222-239` |
+| 关库 / 超时语义 | **仍有缺陷**：`execute()` 超时返回 null 却不取消任务（**L1-03**）；`drainWrites()` 的有界重试只覆盖批次级失败，行级失败仍被吞（**L1-02**）；1.21 与 26.1.2 的 `close()` 里 `wal_checkpoint` 仍早于 `closeStatements()`（**L5-11**） | `DatabaseManager.java:704-744, 1485-1492`；L1-02/L1-03/L5-11 |
+| C7（`co_item` 只还原掉落行）/ C16（替换方块前倒出内容）语义 | **C16 引入了新问题**：`ejectInventory` 倒出的物品不进 undo（rollback 后再 undo 会净丢物品）→ **L2-03（P1）**；C7 的「拾取行不还原」设计不变，但拾取行现在**不带 NBT**（回档后白板物品）→ **L3-17（P2）** | `RollbackManager.java` 的 `ejectInventory`/`removeDroppedItems`；`ItemEntityPickupMixin.java:75-79` |
+| D7（无服务器时丢弃查询结果）/ D9（`close()` 里读池顺序） | **未见新问题**：D7 的丢弃路径只发生在服务器停止时且已有 WARN；D9 的读池关闭已在 1.21.11 调整为早于 checkpoint（1.21/26.1.2 见 L5-11） | `DatabaseManager.java:1670-1690`、`:704-744` |
+| MSPT 前后对比 | **仍未测**（本轮不阻塞）。最小测法：`run/` 用同一世界，`co lookup a:block` 打开 inspector 面板并保持，`/debug stopwatch` 采样 60 s 取 `tickServer`；再用 100 个加载中的漏斗（`L3-10` 的场景）重复一次，对比 P95 | 未执行 |
+
+### 9.8 修复进度（「全修」轮，v1.9.4）
+
+用户 2026-11-14 指令：**全修**。按文件所有权拆成 6 条并行工作流，全部先只在旗舰树 `coreprotect-fabric-1.21.11` 落地，编译通过后再移植到 `-1.21` 与 `-26.1.2`。
+
+| 工作流 | 负责文件 | 覆盖 findings | 状态 |
+|---|---|---|---|
+| W1 数据库层 | `database/DatabaseManager.java`、`database/Criteria.java` | L1-02、L1-04…L1-13、L1-16…L1-18、L4-03/L2-10、L4-09、L4-14、L4-15、L3-21、F-9.2、L5-11 | **已落地**（旗舰树编译通过） |
+| W2 回档引擎 | `rollback/RollbackManager.java`、`util/BlockStateUtil.java`、`util/ItemStackCodec.java` | L2-01、L2-03、L2-05…L2-14、L1-14、L3-11、L4-03、L4-16 | **已落地**，另有主代理追加 2 处 |
+| W3 日志采集 | `CoreProtectFabric.java`、`mixin/*`、`event/*`、`util/NaturalBreakCause.java`、`coreprotect.mixins.json` | **L3-01(P0)**、**L3-02(P0)**、L3-05…L3-09、L3-12…L3-18、L3-20、L5-03、L2-11 | **已落地**（8 个新 mixin，15→23） |
+| W4 容器追踪 | `container/{Container,Hopper,Dispenser}Tracker.java` | L1-01/L3-03、L3-04、L3-10、L3-19、L2-02 | **已落地**，另有主代理补 2 处 |
+| W5 命令/权限/配置 | `command/*`、`config/CoreProtectConfig.java`、`util/Permissions.java`、`i18n/*`、lang JSON | L4-01、L4-04/L5-01、L4-05…L4-13、L4-17…L4-19、L1-03、L1-15、F-9.1、F-9.2 | **已落地**（lang 5×133 键） |
+| W6 工具链/文档 | `.build-tools/**`、`.github/workflows/build.yml`、根与三树 README/OVERVIEW、`body.md` | L5-04…L5-08、L5-10、L5-12…L5-16、L4-20 | **已落地**（`check-ascii` 58 文件绿） |
+
+**不计入修复**：L4-02（误报，见 9.4 R-9.1）。**跨文件契约**（已在各工作流中固定）：`DatabaseManager.purge(Criteria)` / `countDroppedRow()` / `droppedRows()` / `applySyncMode()`；`CoreProtectConfig.shouldLogCommand(String)`；`ContainerTracker.captureBeforeRemoval(ServerWorld, BlockPos)`。
+
+#### 9.8.1 主代理在六路之外的追加（均已编译）
+
+| # | 文件:行 | 内容 | 对应 |
+|---|---|---|---|
+| A1 | `rollback/RollbackManager.java:1253` 新增 `ownedInventory(ServerWorld,BlockPos)`，替换 `:653` 与 `:901` 的 `containerAt` | 回档/撤销替换半边双箱时只倒出**该格自己的 27 格**，不再把幸存的那半也撒到地上 | L2-02 补充 |
+| A2 | `rollback/RollbackManager.java:83` + `startRollback` | `CONSOLE_TIMEOUT_MS = 10_000L`；`operator == null`（控制台/RCON/命令方块）时 `future.get(...)` 后**同步** `applyPlan` | 修复「控制台 `/co rollback` 什么都不打印」（vanilla 在命令返回时刷输出缓冲） |
+| A3 | `container/ContainerTracker.java:308` | `if (!mod.config().logging.container) return;` | 尊重 `logging.container` 开关 |
+| A4 | lang ×5 | `coreprotect.error.db` 去占位符；`coreprotect.undo/rollback/restore.complete` 改 5 占位符（blocks/containers/item ops/skipped/signs） | 中文下不再出现「数据库错误：database read failed」；完成行能显示告示牌与跳过数 |
+| A5 | `CoreProtectFabric.java`、`event/MessageEventListener.java`、`event/SessionEventListener.java`、`command/CoCommand.java` | 命令/聊天行写入 `wid_id`；语言先按 uuid 查、再回落按名字；`/co language` 写 `(name,uuid,lang)` | 打通 W1 预留的 schema 字段（`co_user_uuid`、`co_command/co_chat.wid_id`） |
+| A6 | `.build-tools/test-full.ps1` | `co rollback/restore t:5m r:80` → 去掉 `r:80` | 控制台无玩家位置，C14 会拒绝；否则回归里回档路径完全空跑 |
+
+#### 9.8.3 发布前追加的三项（2026-11-15 14:10）
+
+这些是回归与实测过程中新发现的问题，**不在 84 条之内**，但因为都属于本轮改动直接暴露出来的行为/体验缺陷，一并修掉；控制台 undo 一项只记录不改（超出范围，留待用户决定）。
+
+| 编号 | 级别 | 位置 | 问题 | 处置 |
+|---|---|---|---|---|
+| R-9.2 | P3 | 三棵树 `command/LookupService.java:289`、`:306` | 容器行与物品行用 `Text.literal(l.amount() + "x ")` 再与物品名拼接、`row(...)` 又以空格连接 → 控制台/Discord 侧出现 `1x  diamond` 双空格（游戏内看不出来） | 已修：两处改为 `l.amount() + "x"`，探针实测输出 `1x diamond` |
+| R-9.3 | P2 | 三棵树 `command/CoCommand.java` 的 `debugNatural` | `/co debug natural` 只强制 `cz -1..1` 九个区块且**放完立即释放**：①活塞场景在 `ground.add(0,1,20)`（`baseZ+1` 区块）从来没被强制加载，放置被静默丢弃；②1.21.9+ 无玩家时区块不 tick，火靠 scheduledTick 才蔓延，释放后 `#fire` 永远不出现 —— 结果是官方自检命令在“无玩家服务器”上验证不了三类自然事件 | 已修（三棵树）：新增 `forceChunks(world, minX, maxX, minZ, maxZ, forced)`，范围改 `cx -1..1` × `cz -1..2`（覆盖活塞），并用 `CompletableFuture.delayedExecutor(20L, TimeUnit.SECONDS)` + `server().execute(...)` 在 20 秒后释放（仍满足 L4-08「不永久强制区块」） |
+| O-9.1 | P2（观察，未改） | 三棵树 `rollback/RollbackManager.java:583-589`（`publishUndo`）+ `:110`/`:424`/`:428` | 控制台/RCON/命令方块执行 `/co rollback|restore` 后 `/co undo` 永远回 `There is nothing to undo.`：`publishUndo` 第一行 `if (job.undo \|\| job.operator == null) return;`，而 `lastOperations` 是 `Map<UUID, …>`、`operator == null` 时 id 为 null | **v1.9.3 固有行为**（`git show HEAD:…RollbackManager.java` 同一位置同为 `:426` 处提前 return），非本轮引入；已记入本条，是否修由用户决定 |
+
+实测依据（`.dsh-scratch/probe-natural.ps1`，旗舰树 `runServer` + RCON）：第一次探针 `Blocks: 1` 且 `#tnt`/`#fire`/`#piston` 全空；临时插桩（已全部删除、残留 0 处）后 `#tnt` 出现 **10 行**（`TNT destroyed dirt` / `grass_block`）、`Blocks: 47`、`Containers: 16` ⇒ **TNT 路径本身正常**，空白是区块窗口/时序造成的。
+
+#### 9.8.2 验证状态（2026-11-15 14:20 更新）
+
+- 旗舰树 `compileJava`：**BUILD SUCCESSFUL**（含 A1–A6）。
+- 旗舰树 `test-full.ps1 -Fresh`：**FULL_TEST_DONE**、`MIXIN_FAILURES: no`、`CORE_ENABLED: yes`、exit 0。
+  - A2 已在回归里**实测确认**：日志出现 `CoreProtect - Rollback in progress, this may take a moment...` /
+    `Restore in progress...` / `CoreProtect - No matching data found.` —— 控制台不再是空输出。
+  - `/co status` 含 `Writes:` 行；`/co purge t:1s` 报 `Purge complete. Deleted 33 row(s)`；非法 action 列出 43 个合法动作。
+- 语言文件：三份构建各自 5 个 JSON，旗舰树 `ConvertFrom-Json` 通过，**各 133 键**；`src` 内无 `TEMP-REPRO`/`FIXME`/`System.out` 残留。
+- 关机前的两个移植子代理（`c031d154`/`06cc6b15`）工作**作废**并已重新派发：`aab5a855-c611-4455-971e-3daeba9ad0dc`（1.21，重查 16 个半途文件 + 补 8 个新 mixin）与 `242e9ab3-ecd9-4c12-bf6e-03ef25751c14`（26.1.2，从零移植 37 项）。两者均已收尾并编译通过。
+- **移植缺口（已补齐）**：1.21 首次编译 2 类错误（`isPosLoaded`→`isChunkLoaded` 9 处、`getSpawnPoint()`→`world.getSpawnPos()`）、26.1.2 首次编译 14 个错误（`source.level()`→`getLevel()`、`.add(`→`.offset(`、`piston.PistonBaseBlock`、`hasWorld`、缺 `import HolderLookup`、`BlockState.isOf(Block)`→`getBlock() ==`、`getEntities` 歧义、`ResourceKey.create`）全部由我逐条修复。
+- **三树构建（2026-11-15 14:13，含 R-9.2/R-9.3）**：`1.21.11` = 14,578,811 B、`1.21` = 14,581,083 B、`26.1.2` = 14,579,035 B，三份 `fabric.mod.json` 的 `version` 均 `1.9.4`；1.21 必须联网（`--offline` 会因 fabric-loom 不在缓存而失败）。
+- 语言文件：三份构建各自 5 个 JSON，**各 133 键**，`ConvertFrom-Json` 全通过；`src` 内无 `TEMP-REPRO`/`TEMP-PROBE`/`FIXME`/`System.out` 残留（探针插桩已删除并核对 0 处）。
+- 发布材料已就绪：`CHANGELOG.md` 中英 v1.9.4 两节（英文标题 `:10`、中文标题 `:338`，含新增的「Self-test and display / 自检命令与显示」分组）、`.build-tools/release-v194-template.md` 与三份 `release-v194-<mc>.md`、`.build-tools/modrinth/changelog-1.9.4.md`、`.build-tools/make-notes-194.ps1`（纯 ASCII）、`modrinth/project.json` 的 `changelog_file` 已指向 `changelog-1.9.4.md`。
+- 版本号：`bump-version.ps1 -From 1.9.3 -To 1.9.4` 已跑（三树 `MOD_VERSION`、`gradle.properties`、三树与根目录 README/OVERVIEW/OVERVIEW_EN、`modrinth/versions.json`）。
+- **回归结果（三棵树，2026-11-15 14:26 / 14:31 / 14:36，均为 `-Fresh`）**：`coreprotect-fabric-1.21.11`、`coreprotect-fabric-1.21`、`coreprotect-fabric-26.1.2` 全部 `FULL_TEST_DONE`、exit 0、`MIXIN_FAILURES: no`、`CORE_ENABLED: yes`；日志里 CoreProtect 的 ERROR/WARN 只剩 vanilla 的 offline-mode 提示。上一轮出现的 `[CoreProtect] Missing translation key: coreprotect.cause.random_tick` 已随 15 个语言文件补 6 个 `coreprotect.cause.*` 键（`server`/`entity`/`container`/`gravity`/`random_tick`/`trample`，各文件 133 → **139 键**）而消失。三棵树 jar 同步重建：`1.21.11` = 14,579,149 B、`1.21` = 14,581,465 B、`26.1.2` = 14,579,373 B。
+- **`/co debug natural` 实测（旗舰树，`.dsh-scratch/probe-natural.ps1`）**：R-9.3 修复后 `a:#piston` 从 0 变 **2-4 行**、`a:#tnt` 10 行、`a:#water` 5 行、`u:#hopper a:#container` 与 `a:container` 各 10 行、`co rollback t:5m` 回 `Rollback complete. Blocks: 5, containers: 4, item operations: 11, signs: 0, skipped: 1` ⇒ 自然事件与容器链路在旗舰树**全部可验证**。`a:#fire` 在**无玩家**的 1.21.9+ 服务器上仍为空：火焰只通过 scheduledTick 蔓延，无玩家时即使强制加载 60 秒也可能不烧穿白羊毛（1.21 树因出生点区块长期 tick 才出现 `Fire changed white_wool`）——属环境限制，已在 §9.8.3 记明，不再是日志代码缺陷。

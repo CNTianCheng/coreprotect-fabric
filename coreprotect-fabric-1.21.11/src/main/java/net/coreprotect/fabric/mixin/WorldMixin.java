@@ -29,14 +29,16 @@ public abstract class WorldMixin {
             at = @At("HEAD"))
     private void coreprotect$hookSetBlockState4(BlockPos pos, BlockState state, int flags, int maxUpdateDepth,
                                                 CallbackInfoReturnable<Boolean> cir) {
-        CoreProtectFabric.hookSetBlockState((World) (Object) this, pos, state);
+        // The vanilla flags are passed on: a write carrying Block#MOVED is the source cell of a
+        // piston move, which the piston hook records as its own row (L3-01/L2-11).
+        CoreProtectFabric.hookSetBlockState((World) (Object) this, pos, state, flags);
     }
 
     @Inject(method = "setBlockState(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/BlockState;I)Z",
             at = @At("HEAD"))
     private void coreprotect$hookSetBlockState3(BlockPos pos, BlockState state, int flags,
                                                 CallbackInfoReturnable<Boolean> cir) {
-        CoreProtectFabric.hookSetBlockState((World) (Object) this, pos, state);
+        CoreProtectFabric.hookSetBlockState((World) (Object) this, pos, state, flags);
     }
 
     @Inject(method = "breakBlock(Lnet/minecraft/util/math/BlockPos;ZLnet/minecraft/entity/Entity;I)Z",

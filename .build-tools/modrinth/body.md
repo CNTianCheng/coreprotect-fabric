@@ -32,7 +32,7 @@ CoreProtect Fabric is a **server-side Fabric mod**, independently implemented wi
 **Lookup and inspection**
 
 - `/co lookup` with combined filters, action aliases and pagination
-- `/co inspect` (or `/co i`): left-click a block for its history, right-click a container for its transactions or the adjacent block — block breaking is disabled while inspecting
+- `/co inspect` (or `/co i`): left-click a block for its history, right-click a container for its transactions or the adjacent block, or right-click with a block in hand to look up that block type without placing it — block breaking is disabled while inspecting
 
 **Maintenance and languages**
 
@@ -77,15 +77,15 @@ The database was rebuilt around dictionaries, so repeated text is no longer stor
 
 | Minecraft | Java | Jar |
 |---|---|---|
-| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.2.jar` |
-| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.2.jar` |
-| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.2.jar` |
+| **1.21** | 21 | `coreprotect-fabric-1.21-<version>.jar` |
+| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-<version>.jar` |
+| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-<version>.jar` |
 
-These three builds carry the complete feature set and are kept in sync. Builds for 13 further versions (1.21.1 – 1.21.10, 26.1, 26.1.1, 26.2) ship the v1.0.0 core feature set and are available from the [GitHub releases](https://github.com/CNTianCheng/coreprotect-fabric/releases).
+`<version>` is the mod release number, the same for all three jars. These three builds carry the complete feature set and are kept in sync. Builds for 13 further versions (1.21.1 – 1.21.10, 26.1, 26.1.1, 26.2) ship the v1.0.0 core feature set and are available from the [GitHub releases](https://github.com/CNTianCheng/coreprotect-fabric/releases).
 
 ### Installation
 
-1. Install **Fabric Loader ≥ 0.16** and **Fabric API** on your server.
+1. Install **Fabric Loader** and the matching **Fabric API** on your server: 1.21 needs Loader 0.16.9+ / API 0.102.0+1.21, 1.21.11 needs Loader 0.19.3+ / API 0.141.6+1.21.11, 26.1.2 needs Loader 0.19.3+ / API 0.155.2+26.1.2 (the minimums declared in each jar).
 2. Pick the jar that matches your server's **exact Minecraft version** and its Java runtime (Java 21 for 1.21.x, Java 25 for 26.x).
 3. Drop it into the server's `mods/` folder and start the server. The mod is server-side — players do not need to install anything.
 4. On first launch the configuration is generated at `config/coreprotect-fabric.json` and the database at `coreprotect.db` in the server directory.
@@ -94,7 +94,7 @@ These three builds carry the complete feature set and are kept in sync. Builds f
 
 - Kill records are not rolled back (same as the original CoreProtect)
 - Large rollbacks run on the main thread, protected by the `maxBlocks` cap
-- Natural-event hooks are best-effort: if a future game update breaks one hook, only that category stops logging
+- Natural-event hooks are mandatory mixins (`defaultRequire: 1`): a game update that breaks one of them fails the mod at startup with an error naming the hook, instead of silently dropping a category of records
 - Container rollback uses a simplified item-recovery strategy (withdrawn items are taken back from the container where possible, missing amounts are compensated)
 
 ### Links
@@ -135,7 +135,7 @@ CoreProtect Fabric 是一个**纯服务端** Fabric 模组，以著名的 Bukkit
 **查询与检查**
 
 - `/co lookup` 支持组合筛选、动作别名与分页
-- `/co inspect`（或 `/co i`）：左键查看方块历史，右键查看容器交易或相邻方块；检查模式下禁止破坏方块
+- `/co inspect`（或 `/co i`）：左键查看方块历史，右键查看容器交易或相邻方块，手持方块右键可查询该方块类型（不放置方块）；检查模式下禁止破坏方块
 
 **维护与多语言**
 
@@ -180,15 +180,15 @@ CoreProtect Fabric 是一个**纯服务端** Fabric 模组，以著名的 Bukkit
 
 | Minecraft | Java | 文件 |
 |---|---|---|
-| **1.21** | 21 | `coreprotect-fabric-1.21-1.9.2.jar` |
-| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-1.9.2.jar` |
-| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-1.9.2.jar` |
+| **1.21** | 21 | `coreprotect-fabric-1.21-<version>.jar` |
+| **1.21.11** | 21 | `coreprotect-fabric-1.21.11-<version>.jar` |
+| **26.1.2** | 25 | `coreprotect-fabric-26.1.2-<version>.jar` |
 
-以上三个版本功能完全一致并保持同步；另外 13 个版本（1.21.1 – 1.21.10、26.1、26.1.1、26.2）为 v1.0.0 核心功能集，可在 [GitHub Releases](https://github.com/CNTianCheng/coreprotect-fabric/releases) 下载。
+`<version>` 为该次发布的模组版本号，三个 jar 相同。以上三个版本功能完全一致并保持同步；另外 13 个版本（1.21.1 – 1.21.10、26.1、26.1.1、26.2）为 v1.0.0 核心功能集，可在 [GitHub Releases](https://github.com/CNTianCheng/coreprotect-fabric/releases) 下载。
 
 ### 安装
 
-1. 服务端安装 **Fabric Loader ≥ 0.16** 与 **Fabric API**。
+1. 服务端安装 **Fabric Loader** 与对应版本的 **Fabric API**（1.21：Loader ≥ 0.16.9、API ≥ 0.102.0+1.21；1.21.11：Loader ≥ 0.19.3、API ≥ 0.141.6+1.21.11；26.1.2：Loader ≥ 0.19.3、API ≥ 0.155.2+26.1.2）。
 2. 选择与服务器 **Minecraft 版本完全一致** 的 jar（1.21.x 需要 Java 21，26.x 需要 Java 25）。
 3. 放入服务端 `mods/` 目录后启动即可，属于服务端模组，玩家无需安装。
 4. 首次启动会生成配置 `config/coreprotect-fabric.json`，数据库位于服务端目录下的 `coreprotect.db`。
@@ -197,7 +197,7 @@ CoreProtect Fabric 是一个**纯服务端** Fabric 模组，以著名的 Bukkit
 
 - 击杀记录不会随回滚撤销（与原版 CoreProtect 一致）
 - 大规模回滚在主线程执行，受 `maxBlocks` 上限保护
-- 自然事件钩子为尽力而为：若未来游戏更新使某个钩子失效，仅该类记录停止工作
+- 自然事件钩子为强制挂钩（`defaultRequire: 1`）：若未来游戏更新使某个钩子失效，服务端会在启动时报出该钩子并拒绝启动，而不是静默丢失一类记录
 - 容器回滚采用简化的物品恢复策略（优先从容器取回，缺失部分予以补偿）
 
 ### 链接

@@ -1,14 +1,22 @@
 package net.coreprotect.fabric.rollback;
 
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,7 +37,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.Container;
@@ -48,10 +56,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.AABB;
 
 /**
- * Rollback / restore / undo engine, mirroring CoreProtect's semantics:
- * container transactions are reversed first, then every block position replays all of the
- * logs that touched it (rollback walks them newest first, restore oldest first), and the
- * sign text and dropped item stacks are reverted afterwards.
+ * Rollback / restore / undo engine, mirroring CoreProtect's semantics: every block position
+ * replays all of the logs that touched it (rollback walks them newest first, restore oldest
+ * first) and the container transactions of the same window are reversed afterwards, so the
+ * world already holds the container block again when its contents are put back. The sign text
+ * and the dropped item stacks are reverted last.
  */
 public final class RollbackManager {
     /** Time budget for one slice on the server thread (4 ms), so a big rollback never
@@ -67,7 +76,36 @@ public final class RollbackManager {
     private static final long UNDO_SAVE_NANOS = 5_000_000_000L;
 
     /** How far back a sign's previous text is looked up. */
+    /**
+     * Bound for the console/RCON plan query (see startRollback): these sources only see what is
+     * printed before the command returns, and the indexed lookups are fast.
+     */
+    private static final long CONSOLE_TIMEOUT_MS = 10_000L;
+
     private static final int SIGN_HISTORY_LIMIT = 256;
+
+    /** How many sign positions are resolved before the read pool is given back to other queries. */
+    private static final int SIGN_HISTORY_BATCH = 64;
+
+    /** Upper bound for the per-position sign history queries of one plan. */
+    private static final int MAX_SIGN_HISTORY_QUERIES = 256;
+
+    /** The sign history resolution stops after using the read pool for this long. */
+    private static final long SIGN_HISTORY_BUDGET_NANOS = 50_000_000L;
+
+    /**
+     * How a rollback/restore writes a block state. {@code Block.UPDATE_ALL} asks vanilla for the
+     * full neighbour and callback cascade, and {@code FallingBlock#onBlockAdded} schedules its fall
+     * tick: a column of sand, gravel or anvils restored in the wrong order collapsed before its own
+     * row could be replayed (the fall happens outside the slice, so the expected-state check never
+     * sees it). {@code UPDATE_KNOWN_SHAPE} stores the state as-is, {@code UPDATE_SUPPRESS_DROPS} keeps a replaced
+     * container from dropping its contents (they were taken out and recorded first) and
+     * {@code UPDATE_SKIP_ON_PLACE} skips the fall/redstone hooks. {@code UPDATE_CLIENTS} is
+     * kept so the clients still see the change, and the block entity callbacks are left enabled so
+     * a container block entity is still created and removed like vanilla does it.
+     */
+    private static final int STRICT_FLAGS = Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE
+            | Block.UPDATE_SUPPRESS_DROPS | Block.UPDATE_SKIP_ON_PLACE;
 
     private final Map<UUID, LastOperation> lastOperations = new ConcurrentHashMap<>();
 
@@ -126,8 +164,12 @@ public final class RollbackManager {
     /**
      * A stack that was dropped on the ground by the rollback ({@code added}) or taken off the ground
      * by it; /co undo puts it back or removes it again. {@code nbt} carries the data components.
+     * {@code container} marks a stack that was taken out of a container which the rollback then
+     * replaced: the undo has to put it back into the container instead of deleting it from the
+     * ground, otherwise rollback + undo emptied the container and lost its contents.
      */
-    private record WorldItemUndo(String wid, BlockPos pos, String item, int amount, boolean added, String nbt) {
+    private record WorldItemUndo(String wid, BlockPos pos, String item, int amount, boolean added, String nbt,
+                                 boolean container) {
     }
 
     /** Sign text a rollback/restore replaced; /co undo writes {@code text} back. */
@@ -197,7 +239,21 @@ public final class RollbackManager {
         private int blocksApplied;
         private int itemOps;
         private int itemsApplied;
+        /**
+         * Sign texts that were written back. They are not blocks, so counting them as blocks made the
+         * result line claim more blocks than were restored; they are reported on their own.
+         */
+        private int signOps;
         private int skipped;
+        /** Positions left alone because their chunk was not loaded (never loaded for a rollback). */
+        private int unloadedSkips;
+        /** Piston rows whose partner row is not part of this plan; they are skipped, never half replayed. */
+        private Set<Long> unpairedPistonRows = Set.of();
+        private int pistonSkips;
+        /** Container positions of which at least one row was really replayed (not just matched). */
+        private int containerGroupsApplied;
+        /** Whether the container group that is currently replayed moved at least one item. */
+        private boolean containerGroupTouched;
         private long lastUndoSave;
 
         private Job(MinecraftServer server, CommandSourceStack source, ServerPlayer operator,
@@ -230,19 +286,41 @@ public final class RollbackManager {
             Messages.cmd(source, "coreprotect.error.busy");
             return;
         }
-        Messages.cmd(source, isRestore ? "coreprotect.restore.start" : "coreprotect.rollback.start");
+        ActionScope scope = ActionScope.of(c.action);
+        if (scope == ActionScope.UNSUPPORTED) {
+            // The action filter used to reach co_block only, so an action this engine cannot revert
+            // (a:#chat, a:#command, a:#session) filtered nothing at all and the command rolled back
+            // every block of the window. Say so instead of doing the wrong thing.
+            Messages.error(source, "coreprotect.error.invalid_action", c.action);
+            return;
+        }
         ensureUndoLoaded();
 
-        mod.database().submitRead(() -> {
-            List<DatabaseManager.BlockLog> logs = mod.database().queryBlocks(c, limit, 0);
+        // submitReadFuture rather than submitRead: a query that is rejected because the database is
+        // shutting down has to reach the caller, not disappear behind a log line.
+        CompletableFuture<Plan> future = mod.database().submitReadFuture(() -> {
+            List<DatabaseManager.BlockLog> logs = scope.blocks
+                    ? mod.database().queryBlocks(c, limit, 0) : List.of();
             if (logs == null) return null;
-            if (logs.size() > maxBlocks) return new Plan(true, List.of(), List.of(), 0, List.of(), List.of(), List.of());
-            List<DatabaseManager.ContainerLog> containerLogs = mod.database().queryContainers(c, limit, 0);
+            List<DatabaseManager.ContainerLog> containerLogs = scope.containers
+                    ? mod.database().queryContainers(c, limit, 0) : List.of();
             if (containerLogs == null) return null;
-            // Container rows are capped by the same limit as block rows: without this check a
-            // search whose newest rows are container transactions silently rolled back only the
-            // newest ones and still reported success.
-            if (containerLogs.size() > maxBlocks) return new Plan(true, List.of(), List.of(), 0, List.of(), List.of(), List.of());
+            List<DatabaseManager.SignLog> signLogs = scope.signs
+                    ? mod.database().querySigns(c, limit, 0) : List.of();
+            if (signLogs == null) return null;
+            List<DatabaseManager.ItemLog> itemLogs = scope.items
+                    ? mod.database().queryItems(c, limit, 0) : List.of();
+            if (itemLogs == null) return null;
+            List<DatabaseManager.EntityLog> entityLogs = scope.entities
+                    ? mod.database().queryEntities(c, limit, 0) : List.of();
+            if (entityLogs == null) return null;
+            // The cap is on the whole plan. Capping every table on its own let a single command
+            // apply about five times maxBlocks and still report success.
+            long total = (long) logs.size() + containerLogs.size() + signLogs.size()
+                    + itemLogs.size() + entityLogs.size();
+            if (total > maxBlocks) {
+                return new Plan(true, List.of(), List.of(), 0, List.of(), List.of(), List.of());
+            }
             // One chain per position, newest row first, so every row can be replayed in turn.
             Map<PosKey, List<DatabaseManager.BlockLog>> chains = new LinkedHashMap<>();
             for (DatabaseManager.BlockLog l : logs) {
@@ -250,17 +328,6 @@ public final class RollbackManager {
                 chains.computeIfAbsent(PosKey.of(l.wid(), l.x(), l.y(), l.z()), k -> new ArrayList<>()).add(l);
             }
             Map<PosKey, List<DatabaseManager.ContainerLog>> groups = groupContainers(containerLogs);
-            List<DatabaseManager.SignLog> signLogs = mod.database().querySigns(c, limit, 0);
-            if (signLogs == null) return null;
-            List<DatabaseManager.ItemLog> itemLogs = mod.database().queryItems(c, limit, 0);
-            if (itemLogs == null) return null;
-            List<DatabaseManager.EntityLog> entityLogs = mod.database().queryEntities(c, limit, 0);
-            if (entityLogs == null) return null;
-            // Sign, item and entity rows are capped like the block and container rows: a silently
-            // truncated list would only revert the newest matches and still report success.
-            if (signLogs.size() > maxBlocks || itemLogs.size() > maxBlocks || entityLogs.size() > maxBlocks) {
-                return new Plan(true, List.of(), List.of(), 0, List.of(), List.of(), List.of());
-            }
             return new Plan(false,
                     new ArrayList<>(chains.entrySet()),
                     new ArrayList<>(groups.entrySet()),
@@ -268,25 +335,80 @@ public final class RollbackManager {
                     resolveSignTargets(mod, signLogs, isRestore),
                     itemLogs,
                     entityLogs);
-        }, plan -> {
-            if (plan == null) {
-                Messages.error(source, "coreprotect.error.db", "database read failed");
-                return;
-            }
-            if (plan.tooLarge()) {
-                Messages.error(source, "coreprotect.rollback.too_many", maxBlocks);
-                return;
-            }
-            Job job = new Job(mod.server(), source, operator, isRestore, false);
-            job.blocks = plan.blocks();
-            job.containers = plan.containers();
-            job.containerGroups = plan.containerGroups();
-            job.signs = plan.signs();
-            job.items = plan.items();
-            job.entities = plan.entities();
-            runningJobs.add(job);
-            slice(job);
         });
+        MinecraftServer server = mod.server();
+        if (future == null) {
+            // The read pool is already gone (server stopping), so nothing was queried at all.
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Rollback refused - the database is shutting down.");
+            Messages.error(source, "coreprotect.error.db", "");
+            return;
+        }
+        if (server == null) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Rollback refused - no server available.");
+            Messages.error(source, "coreprotect.error.db", "");
+            return;
+        }
+        if (operator == null) {
+            // Console, RCON and command blocks only see what is printed before the command returns:
+            // vanilla flushes their output buffer at that point, so an asynchronous plan left them
+            // with an empty answer (the rollback itself still ran). Wait for the plan with a bound -
+            // the queries are indexed lookups, and a timeout only means the answer moves to the log.
+            try {
+                Plan plan = future.get(CONSOLE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                applyPlan(source, operator, server, isRestore, maxBlocks, plan);
+                return;
+            } catch (TimeoutException e) {
+                Messages.cmd(source, isRestore ? "coreprotect.restore.start" : "coreprotect.rollback.start");
+                Messages.error(source, "coreprotect.still_running");
+                CoreProtectFabric.LOGGER.warn(
+                        "[CoreProtect] Plan query is still running after {} ms; the operation will start when it is ready and its result is written to this log.",
+                        CONSOLE_TIMEOUT_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                Messages.error(source, "coreprotect.error.db", "");
+                return;
+            } catch (ExecutionException e) {
+                Messages.error(source, "coreprotect.error.db", "");
+                return;
+            }
+        }
+        future.thenAccept(plan -> {
+            try {
+                server.execute(() -> applyPlan(source, operator, server, isRestore, maxBlocks, plan));
+            } catch (RuntimeException e) {
+                // the server started stopping between the query and the result
+                CoreProtectFabric.LOGGER.warn("[CoreProtect] Rollback result discarded - the server is stopping.", e);
+            }
+        });
+    }
+
+    /** Turns a finished query into a job and starts it. Runs on the server thread. */
+    private void applyPlan(CommandSourceStack source, ServerPlayer operator, MinecraftServer server,
+                           boolean isRestore, int maxBlocks, Plan plan) {
+        if (plan == null) {
+            // The JDBC/SQL reason is in the log. The caller gets the localized generic message: a
+            // hard coded English sentence used to be passed into the {0} of every language, so a
+            // Chinese player read "数据库错误：database read failed".
+            Messages.error(source, "coreprotect.error.db", "");
+            return;
+        }
+        if (plan.tooLarge()) {
+            Messages.error(source, "coreprotect.rollback.too_many", maxBlocks);
+            return;
+        }
+        // Announced only now: a plan that is rejected for its size never promised a rollback that
+        // was not going to run.
+        Messages.cmd(source, isRestore ? "coreprotect.restore.start" : "coreprotect.rollback.start");
+        Job job = new Job(server, source, operator, isRestore, false);
+        job.blocks = plan.blocks();
+        job.containers = plan.containers();
+        job.containerGroups = plan.containerGroups();
+        job.signs = plan.signs();
+        job.items = plan.items();
+        job.entities = plan.entities();
+        job.unpairedPistonRows = findUnpairedPistonRows(plan.blocks());
+        runningJobs.add(job);
+        slice(job);
     }
 
     /** Reverts the caller's last rollback/restore. Reports "nothing to undo" itself. */
@@ -299,13 +421,14 @@ public final class RollbackManager {
             Messages.cmd(source, "coreprotect.error.busy");
             return;
         }
-        LastOperation op = operator == null ? null : lastOperations.remove(operator.getUUID());
+        UUID id = operator == null ? null : operator.getUUID();
+        // The record is only read here; it is removed when the undo finished (see finish). Taking it
+        // out of the map before the work ran meant a job that died halfway - an exception, a stop,
+        // a crash - left the world half reverted with no record left to retry from.
+        LastOperation op = id == null ? null : lastOperations.get(id);
         if (op == null || op.isEmpty()) {
             Messages.cmd(source, "coreprotect.undo.empty");
             return;
-        }
-        if (operator != null) {
-            saveLastOperations(); // the record is consumed, so it must not stay on disk either
         }
         Job job = new Job(CoreProtectFabric.instance().server(), source, operator, false, true);
         job.operation = op;
@@ -325,7 +448,7 @@ public final class RollbackManager {
                 commitUndo(job);
                 CoreProtectFabric.LOGGER.info(
                         "[CoreProtect] {} stopped by server shutdown: {} block(s), {} container(s), {} item(s) applied, {} skipped.",
-                        job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroups,
+                        job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroupsApplied,
                         job.itemOps, job.skipped);
             } catch (Exception e) {
                 CoreProtectFabric.LOGGER.warn("[CoreProtect] Failed to store the undo record of an interrupted rollback", e);
@@ -360,7 +483,10 @@ public final class RollbackManager {
                 // The raw exception (JDBC paths, SQL state, ...) is for the log only: the command
                 // source - and with it a command block's log - gets the generic database error.
                 CoreProtectFabric.LOGGER.error("[CoreProtect] Rollback failed", e);
-                Messages.error(job.source, "coreprotect.error.db");
+                // The command source (and a command block's log) gets the localized generic
+                // message; the argument stays empty so no English text lands in {0} of a
+                // translated line (L4-16).
+                Messages.error(job.source, "coreprotect.error.db", "");
                 // Half of the world has already been changed, so the undo record has to be
                 // written even though the job aborted.
                 finish(job, true);
@@ -375,8 +501,8 @@ public final class RollbackManager {
             // The server is already gone: nothing more can be applied. The rest of the plan stays
             // unapplied and the caller is told instead of getting a silent partial rollback.
             CoreProtectFabric.LOGGER.warn("[CoreProtect] {} stopped: no server available ({} block(s), {} container(s), {} item(s) applied, {} skipped).",
-                    job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroups, job.itemOps, job.skipped);
-            Messages.error(job.source, "coreprotect.error.db", "server unavailable");
+                    job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroupsApplied, job.itemOps, job.skipped);
+            Messages.error(job.source, "coreprotect.error.db", "");
             finish(job, true);
             return;
         }
@@ -396,8 +522,27 @@ public final class RollbackManager {
     private void finish(Job job, boolean failed) {
         runningJobs.remove(job);
         if (job.undo) {
+            if (job.operator != null) {
+                if (!failed) {
+                    // The undo replayed the record completely, so it is consumed now. Doing this at
+                    // the start (before the work ran) lost the record whenever the job aborted.
+                    lastOperations.remove(job.operator.getUUID());
+                    saveLastOperations();
+                } else {
+                    // Half of the undo may be applied already. The record stays in memory and on
+                    // disk, so /co undo can be run again instead of losing the way back.
+                    CoreProtectFabric.LOGGER.warn(
+                            "[CoreProtect] Undo stopped early; the record is kept so /co undo can be retried ({} block(s), {} item operation(s) reverted, {} skipped).",
+                            job.blocksApplied, job.itemsApplied, job.skipped);
+                }
+            }
             if (!failed) {
-                Messages.success(job.source, "coreprotect.undo.complete", job.blocksApplied);
+                // The message format spells out the block count only, but the other counters are
+                // passed as well: MessageFormat ignores unused arguments, so a translated line that
+                // mentions the item operations, the sign texts or the skipped rows works without
+                // touching the code again.
+                Messages.success(job.source, "coreprotect.undo.complete",
+                        job.blocksApplied, job.containerGroupsApplied, job.itemsApplied, job.skipped, job.signOps);
             }
             return;
         }
@@ -407,17 +552,30 @@ public final class RollbackManager {
         if (failed) {
             return; // the error was already reported
         }
-        if (job.blocksApplied == 0 && job.itemOps == 0 && job.skipped == 0) {
+        if (job.blocksApplied == 0 && job.itemOps == 0 && job.signOps == 0 && job.skipped == 0) {
             Messages.cmd(job.source, "coreprotect.rollback.empty");
             return;
         }
+        // "containers" counts the container positions that really moved items, not the positions the
+        // query matched: a fully skipped container group used to be reported as restored.
         Messages.success(job.source, job.isRestore ? "coreprotect.restore.complete" : "coreprotect.rollback.complete",
-                job.blocksApplied, job.containerGroups, job.itemOps, job.skipped);
+                job.blocksApplied, job.containerGroupsApplied, job.itemOps, job.skipped, job.signOps);
+        if (job.unloadedSkips > 0) {
+            CoreProtectFabric.LOGGER.warn(
+                    "[CoreProtect] {} left {} position(s) alone because their chunk was not loaded; run the command again for those.",
+                    job.isRestore ? "Restore" : "Rollback", job.unloadedSkips);
+        }
+        if (job.pistonSkips > 0) {
+            CoreProtectFabric.LOGGER.warn(
+                    "[CoreProtect] {} skipped {} piston move(s) whose partner row was not part of the search result.",
+                    job.isRestore ? "Restore" : "Rollback", job.pistonSkips);
+        }
         if (job.source.getPlayer() == null) {
             // console and RCON only print their output while the command runs, so the result
             // of an asynchronous rollback is mirrored into the server log
-            CoreProtectFabric.LOGGER.info("[CoreProtect] {} finished: {} block(s), {} container(s), {} item(s), {} skipped.",
-                    job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroups, job.itemOps, job.skipped);
+            CoreProtectFabric.LOGGER.info("[CoreProtect] {} finished: {} block(s), {} container(s), {} item(s), {} sign(s), {} skipped.",
+                    job.isRestore ? "Restore" : "Rollback", job.blocksApplied, job.containerGroupsApplied, job.itemOps,
+                    job.signOps, job.skipped);
         }
     }
 
@@ -454,18 +612,108 @@ public final class RollbackManager {
 
     /** One unit of rollback work. Returns false when there is nothing left to do. */
     private boolean stepRollback(Job job) {
+        // The block rows run first: the container rows of the same window replay into the world the
+        // rollback just restored. Reversed, a window that removed a container and touched its
+        // contents ended with the container stage finding air - every container row was skipped and
+        // the inventory was gone for good even though the block had been restored.
+        if (job.blockGroupIndex < job.blocks.size()) {
+            Map.Entry<PosKey, List<DatabaseManager.BlockLog>> entry = job.blocks.get(job.blockGroupIndex);
+            List<DatabaseManager.BlockLog> chain = entry.getValue();
+            // A rollback replays the chain from the newest row down, a restore from the oldest up.
+            int row = job.isRestore ? chain.size() - 1 - job.blockRowIndex : job.blockRowIndex;
+            DatabaseManager.BlockLog l = chain.get(row);
+            job.blockRowIndex++;
+            if (job.blockRowIndex >= chain.size()) {
+                job.blockGroupIndex++;
+                job.blockRowIndex = 0;
+            }
+            ServerLevel world = worldOf(job.server, l.wid());
+            if (world == null) {
+                job.skipped++;
+                return true;
+            }
+            if (job.unpairedPistonRows.contains(l.id())) {
+                // The other half of this piston move is not part of the plan: a b:/r: filter can keep
+                // one of the two rows and drop the other, and so can the result limit. Replaying the
+                // "from" row alone leaves the pushed block at its destination (a copy), replaying
+                // only the "to" row deletes it.
+                job.pistonSkips++;
+                job.skipped++;
+                return true;
+            }
+            BlockState target = BlockStateUtil.parseOrNull(job.server, job.isRestore ? l.newData() : l.oldData());
+            BlockState expected = BlockStateUtil.parseOrNull(job.server, job.isRestore ? l.oldData() : l.newData());
+            if (target == null || expected == null) {
+                // A state that cannot be parsed (block mod removed, ...) must never be treated as
+                // air: that would delete whatever stands there instead of skipping this row.
+                job.skipped++;
+                return true;
+            }
+            BlockPos pos = new BlockPos(l.x(), l.y(), l.z());
+            if (!world.isLoaded(pos)) {
+                // getBlockState()/setBlockState() load - and generate - a chunk on demand, so a
+                // rollback over an area nobody is in used to generate chunk after chunk and ignore
+                // the 4 ms slice budget completely.
+                job.unloadedSkips++;
+                job.skipped++;
+                return true;
+            }
+            BlockState current = world.getBlockState(pos);
+            if (!current.equals(expected)) {
+                if (current.equals(target)) {
+                    // The world moved on since this row was written, or a newer row of the chain
+                    // already produced this state (then the position simply needs no change). Either
+                    // way this row cannot be replayed; the next, older one still can.
+                    return true;
+                }
+                if (!isTransientMedium(expected) || !(current.isAir() || isTransientMedium(current))) {
+                    job.skipped++;
+                    return true;
+                }
+                // A #fire/#water row expects the transient medium it left behind (fire, flowing
+                // water). That medium disappears on its own once the fire burnt out or the water
+                // flowed away, so the position stayed "skipped" forever although the row is
+                // replayable. Fall through and restore the block the row had before.
+            }
+            if (target.getBlock() != current.getBlock()) {
+                // Replacing a block that carries an inventory removes its block entity before
+                // vanilla's onStateReplaced() could scatter the contents, so they have to be taken
+                // out first - otherwise the container is emptied into nothing. They are dropped next
+                // to the container and recorded as container items, so the undo puts them back
+                // instead of taking them off the ground (L2-03).
+                // Only the inventory owned by this very block: a merged double chest would also
+                // scatter the half that survives the rollback into the world.
+                Container inv = ownedContainer(world, pos);
+                if (inv != null) {
+                    ejectContainer(inv, world, pos, job, l.wid());
+                }
+            }
+            world.setBlock(pos, target, STRICT_FLAGS);
+            BlockStateUtil.applySignText(world, pos, l.meta());
+            job.blocksApplied++;
+            job.undos.add(new BlockUndo(l.wid(), pos,
+                    BlockStateUtil.stringify(target), BlockStateUtil.stringify(expected)));
+            return true;
+        }
         if (job.groupIndex < job.containers.size()) {
             Map.Entry<PosKey, List<DatabaseManager.ContainerLog>> entry = job.containers.get(job.groupIndex);
             List<DatabaseManager.ContainerLog> list = entry.getValue();
             ServerLevel world = worldOf(job.server, entry.getKey().wid());
-            if (world == null) {
+            BlockPos pos = entry.getKey().pos();
+            if (world == null || !world.isLoaded(pos)) {
+                if (world != null) {
+                    job.unloadedSkips++;
+                }
                 job.skipped++;
                 job.groupIndex++;
                 job.entryIndex = 0;
                 return true;
             }
-            BlockEntity be = world.getBlockEntity(entry.getKey().pos());
-            if (!(be instanceof Container inv)) {
+            // The merged 54 slot inventory of a double chest, i.e. what the tracker wrote its deltas
+            // for. Reading the block entity at the row's position (the half the player opened) gave
+            // only 27 slots, so the other half of every double chest transaction was never replayed.
+            Container inv = ContainerTracker.containerAt(world, pos);
+            if (inv == null) {
                 // The position does not hold a container (any more), so its item transactions
                 // cannot be reversed; without the counter the result line claimed
                 // "containers: 0, skipped: 0" even though nothing was restored.
@@ -488,66 +736,23 @@ public final class RollbackManager {
                 boolean added = job.isRestore == deposit;
                 // Only what really moved is recorded: a row can describe 64 items while the container
                 // still held 32, and an undo that puts all 64 back would invent the difference.
-                job.itemUndos.add(new ItemUndo(log.wid(), entry.getKey().pos(), log.data(), done, added, log.nbt()));
+                job.itemUndos.add(new ItemUndo(log.wid(), pos, log.data(), done, added, log.nbt()));
+                job.containerGroupTouched = true;
             } else {
                 job.skipped++;
             }
             if (job.entryIndex >= list.size()) {
+                if (job.containerGroupTouched) {
+                    // the reported "containers" count only counts positions that really changed
+                    job.containerGroupsApplied++;
+                    job.containerGroupTouched = false;
+                }
                 // The container is final now: refresh the baseline of every player watching it,
                 // so the change this rollback just made is not attributed to them later.
-                ContainerTracker.rebaseline(world, entry.getKey().pos());
+                ContainerTracker.rebaseline(world, pos);
                 job.groupIndex++;
                 job.entryIndex = 0;
             }
-            return true;
-        }
-        if (job.blockGroupIndex < job.blocks.size()) {
-            Map.Entry<PosKey, List<DatabaseManager.BlockLog>> entry = job.blocks.get(job.blockGroupIndex);
-            List<DatabaseManager.BlockLog> chain = entry.getValue();
-            // A rollback replays the chain from the newest row down, a restore from the oldest up.
-            int row = job.isRestore ? chain.size() - 1 - job.blockRowIndex : job.blockRowIndex;
-            DatabaseManager.BlockLog l = chain.get(row);
-            job.blockRowIndex++;
-            if (job.blockRowIndex >= chain.size()) {
-                job.blockGroupIndex++;
-                job.blockRowIndex = 0;
-            }
-            ServerLevel world = worldOf(job.server, l.wid());
-            if (world == null) {
-                job.skipped++;
-                return true;
-            }
-            BlockState target = BlockStateUtil.parseOrNull(job.server, job.isRestore ? l.newData() : l.oldData());
-            BlockState expected = BlockStateUtil.parseOrNull(job.server, job.isRestore ? l.oldData() : l.newData());
-            if (target == null || expected == null) {
-                // A state that cannot be parsed (block mod removed, ...) must never be treated as
-                // air: that would delete whatever stands there instead of skipping this row.
-                job.skipped++;
-                return true;
-            }
-            BlockPos pos = new BlockPos(l.x(), l.y(), l.z());
-            BlockState current = world.getBlockState(pos);
-            if (!current.equals(expected)) {
-                // The world moved on since this row was written, or a newer row of the chain
-                // already produced this state (then the position simply needs no change). Either
-                // way this row cannot be replayed; the next, older one still can.
-                if (!current.equals(target)) {
-                    job.skipped++;
-                }
-                return true;
-            }
-            if (target.getBlock() != current.getBlock() && world.getBlockEntity(pos) instanceof Container inv) {
-                // Replacing a block that carries an inventory removes its block entity before
-                // vanilla's onStateReplaced() could scatter the contents, so they have to be
-                // taken out first - otherwise the container is emptied into nothing. They are
-                // dropped next to the container and recorded, so the undo takes them away again.
-                ejectInventory(inv, world, pos, job, l.wid());
-            }
-            world.setBlock(pos, target, Block.UPDATE_ALL);
-            BlockStateUtil.applySignText(world, pos, l.meta());
-            job.blocksApplied++;
-            job.undos.add(new BlockUndo(l.wid(), pos,
-                    BlockStateUtil.stringify(target), BlockStateUtil.stringify(expected)));
             return true;
         }
         if (job.signIndex < job.signs.size()) {
@@ -562,13 +767,18 @@ public final class RollbackManager {
                 return true;
             }
             BlockPos pos = target.pos().pos();
+            if (!world.isLoaded(pos)) {
+                job.unloadedSkips++;
+                job.skipped++;
+                return true;
+            }
             String previous = BlockStateUtil.replaceSignText(world, pos, meta);
             if (previous == null) {
                 job.skipped++; // no sign at that position (any more)
                 return true;
             }
             job.signUndos.add(new SignUndo(target.pos().wid(), pos, previous));
-            job.blocksApplied++; // a restored sign text is reported with the block counter
+            job.signOps++; // a sign text is not a block: it has its own counter
             return true;
         }
         if (job.itemIndex < job.items.size()) {
@@ -588,6 +798,11 @@ public final class RollbackManager {
                 return true;
             }
             BlockPos pos = new BlockPos(l.x(), l.y(), l.z());
+            if (!world.isLoaded(pos)) {
+                job.unloadedSkips++;
+                job.skipped++;
+                return true;
+            }
             // The row's data components describe the stack that was dropped; a row written before
             // they were stored falls back to a plain stack of that item.
             ItemStack template = ItemStackCodec.decode(l.nbt(), world.registryAccess());
@@ -599,7 +814,9 @@ public final class RollbackManager {
                 job.skipped++; // the stack is gone (picked up, burnt, despawned, moved)
                 return true;
             }
-            job.worldItemUndos.add(new WorldItemUndo(l.wid(), pos, l.data(), removed, false, l.nbt()));
+            // container=false: this row is an item drop, so the undo picks the stack off the ground
+            // instead of storing it in a container.
+            job.worldItemUndos.add(new WorldItemUndo(l.wid(), pos, l.data(), removed, false, l.nbt(), false));
             job.itemOps++;
             return true;
         }
@@ -615,35 +832,43 @@ public final class RollbackManager {
         return false;
     }
 
-    /** One unit of undo work. Returns false when there is nothing left to do. */
+    /**
+     * One unit of undo work. Returns false when there is nothing left to do.
+     * <p>
+     * The order is the reverse of {@link #stepRollback}: the item changes the rollback made in a
+     * container are reverted before its block is replaced, and the stacks the rollback emptied out of
+     * a replaced container are put back last - the block stage has restored the container by then, so
+     * they can go into it again instead of being deleted from the ground.
+     */
     private boolean stepUndo(Job job) {
         LastOperation op = job.operation;
-        if (job.blockUndoIndex < op.blocks().size()) {
-            // Undo runs backwards: the change a rollback made last has to be reverted first,
-            // which also makes the replayed per-position chains come out right.
-            BlockUndo u = op.blocks().get(op.blocks().size() - 1 - job.blockUndoIndex);
-            job.blockUndoIndex++;
-            ServerLevel world = worldOf(job.server, u.wid());
-            if (world == null) return true;
-            BlockState expected = BlockStateUtil.parseOrNull(job.server, u.expected());
-            BlockState apply = BlockStateUtil.parseOrNull(job.server, u.apply());
-            if (expected == null || apply == null) return true; // nothing to restore from
-            if (!world.getBlockState(u.pos()).equals(expected)) return true;
-            world.setBlock(u.pos(), apply, Block.UPDATE_ALL);
-            job.blocksApplied++;
-            return true;
-        }
         if (job.undoIndex < op.items().size()) {
             ItemUndo u = op.items().get(job.undoIndex);
             job.undoIndex++;
             ServerLevel world = worldOf(job.server, u.wid());
             if (world == null) return true;
-            BlockEntity be = world.getBlockEntity(u.pos());
-            if (!(be instanceof Container inv)) return true;
+            if (!world.isLoaded(u.pos())) {
+                job.unloadedSkips++;
+                job.skipped++;
+                return true;
+            }
+            // containerAt gives the merged 54 slot inventory of a double chest - the inventory the
+            // container rows were written for.
+            Container inv = ContainerTracker.containerAt(world, u.pos());
+            if (inv == null) {
+                job.skipped++; // the container is not there (any more), so this change is lost
+                return true;
+            }
             Identifier id = Identifier.tryParse(u.item());
-            if (id == null) return true;
+            if (id == null) {
+                job.skipped++;
+                return true;
+            }
             Item item = BuiltInRegistries.ITEM.getOptional(id).orElse(null);
-            if (item == null || item == Items.AIR) return true;
+            if (item == null || item == Items.AIR) {
+                job.skipped++;
+                return true;
+            }
             // The stored data components decide what the stack actually was; without them an enchanted
             // item would be restored as a plain one and a filled shulker box as an empty one.
             ItemStack template = ItemStackCodec.decode(u.nbt(), world.registryAccess());
@@ -651,10 +876,13 @@ public final class RollbackManager {
                 template = new ItemStack(item);
             }
             if (u.wasAdded()) {
-                // the rollback put it into the container; the undo takes it out again, and what no
-                // longer fits is dropped (it is on the ground either way, so nothing is created)
+                // the rollback put it into the container; the undo takes it out again. What the
+                // player already removed stays removed - the undo never creates a stack to fill
+                // the gap.
                 removeItems(inv, template, u.amount());
             } else {
+                // the rollback took it out; the undo puts it back, and an overflow is dropped
+                // next to the container instead of vanishing
                 addItems(inv, template.copyWithCount(u.amount()), world, u.pos(), null, null);
             }
             // the undo changed the container as well, so the watchers' baseline has to follow
@@ -666,9 +894,52 @@ public final class RollbackManager {
             SignUndo u = op.signs().get(job.signUndoIndex++);
             ServerLevel world = worldOf(job.server, u.wid());
             if (world == null) return true;
-            if (BlockStateUtil.replaceSignText(world, u.pos(), u.text()) != null) {
-                job.blocksApplied++;
+            if (!world.isLoaded(u.pos())) {
+                job.unloadedSkips++;
+                return true;
             }
+            if (BlockStateUtil.replaceSignText(world, u.pos(), u.text()) != null) {
+                job.signOps++;
+            }
+            return true;
+        }
+        if (job.blockUndoIndex < op.blocks().size()) {
+            // Undo runs backwards: the change a rollback made last has to be reverted first,
+            // which also makes the replayed per-position chains come out right.
+            BlockUndo u = op.blocks().get(op.blocks().size() - 1 - job.blockUndoIndex);
+            job.blockUndoIndex++;
+            ServerLevel world = worldOf(job.server, u.wid());
+            if (world == null) return true;
+            if (!world.isLoaded(u.pos())) {
+                job.unloadedSkips++;
+                job.skipped++;
+                return true;
+            }
+            BlockState expected = BlockStateUtil.parseOrNull(job.server, u.expected());
+            BlockState apply = BlockStateUtil.parseOrNull(job.server, u.apply());
+            if (expected == null || apply == null) {
+                job.skipped++; // nothing to restore from
+                return true;
+            }
+            BlockState current = world.getBlockState(u.pos());
+            if (!current.equals(expected)) {
+                job.skipped++; // the position changed since the rollback ran
+                return true;
+            }
+            if (apply.getBlock() != current.getBlock()) {
+                // Undoing a rollback that placed a block replaces a block again. When the current
+                // block carries an inventory, removing its block entity loses the contents, so take
+                // them out first and record them - the rollback side already did this, the undo side
+                // silently deleted whatever had been put in since (L2-07).
+                Container inv = ownedContainer(world, u.pos());
+                if (inv != null && hasItems(inv)) {
+                    ejectContainer(inv, world, u.pos(), job, u.wid());
+                    CoreProtectFabric.LOGGER.warn("[CoreProtect] Undo emptied the container it replaced at {} in {}; its contents were dropped next to it and recorded.",
+                            u.pos(), u.wid());
+                }
+            }
+            world.setBlock(u.pos(), apply, STRICT_FLAGS);
+            job.blocksApplied++;
             return true;
         }
         if (job.worldItemIndex < op.worldItems().size()) {
@@ -684,17 +955,140 @@ public final class RollbackManager {
             if (template == null) {
                 template = new ItemStack(item);
             }
+            int amount = u.amount();
             if (u.added()) {
-                // the rollback dropped these (it emptied a container that was replaced); the undo
-                // picks them off the ground again, and what was already taken stays taken
-                removeDroppedItems(world, u.pos(), template, u.amount());
+                if (u.container() && amount > 0) {
+                    // The rollback emptied this container before it replaced the block, so the undo
+                    // puts the stack back into the container. Deleting it from the ground alone left
+                    // the container empty and the drop gone: rollback + undo lost the inventory
+                    // (L2-03). This stage runs after the block stage, so the container is back.
+                    Container inv = world.isLoaded(u.pos()) ? ContainerTracker.containerAt(world, u.pos()) : null;
+                    if (inv != null) {
+                        int stored = storeInContainer(inv, template.copyWithCount(amount));
+                        if (stored > 0) {
+                            amount -= stored;
+                            ContainerTracker.rebaseline(world, u.pos());
+                        }
+                    } else if (!world.isLoaded(u.pos())) {
+                        job.unloadedSkips++;
+                    }
+                    if (amount > 0) {
+                        // what did not fit (or a container that is gone) is taken off the ground, so
+                        // the undo can never duplicate a stack
+                        removeDroppedItems(world, u.pos(), template, amount);
+                    }
+                } else {
+                    // the rollback dropped these; the undo picks them off the ground again, and what
+                    // was already taken stays taken
+                    removeDroppedItems(world, u.pos(), template, amount);
+                }
             } else {
-                dropItems(world, u.pos(), template, u.amount());
+                dropItems(world, u.pos(), template, amount);
             }
             job.itemsApplied++;
             return true;
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------
+
+    /**
+     * The tables a rollback/restore may replay, derived from the {@code a:} argument. Until now the
+     * action only filtered {@code co_block}, so {@code /co rollback a:#kill} also replayed the
+     * container accesses and sign edits of the window, and {@code a:#chat} replayed everything.
+     */
+    private enum ActionScope {
+        ALL(true, true, true, true, true),
+        BLOCKS(true, false, false, false, false),
+        CONTAINERS(false, true, false, false, false),
+        SIGNS(false, false, true, false, false),
+        ITEMS(false, false, false, true, false),
+        ENTITIES(false, false, false, false, true),
+        /** The action names data this command cannot replay (chat, commands, sessions). */
+        UNSUPPORTED(false, false, false, false, false);
+
+        private final boolean blocks;
+        private final boolean containers;
+        private final boolean signs;
+        private final boolean items;
+        private final boolean entities;
+
+        ActionScope(boolean blocks, boolean containers, boolean signs, boolean items, boolean entities) {
+            this.blocks = blocks;
+            this.containers = containers;
+            this.signs = signs;
+            this.items = items;
+            this.entities = entities;
+        }
+
+        static ActionScope of(String action) {
+            if (action == null || action.isBlank()) return ALL;
+            String raw = action.toLowerCase(Locale.ROOT);
+            boolean prefixed = raw.startsWith("#") || raw.startsWith("+") || raw.startsWith("-");
+            String base = prefixed ? raw.substring(1) : raw;
+            return switch (base) {
+                // "block" is the parser's default and keeps the historical behaviour of replaying
+                // every table; an explicit table or the +/- block filter only affects co_block.
+                case "block", "blocks" -> prefixed ? BLOCKS : ALL;
+                case "container", "containers" -> CONTAINERS;
+                case "sign", "signs" -> SIGNS;
+                case "item", "items" -> ITEMS;
+                case "kill", "kills", "entity", "entities", "mob", "mobs", "death", "deaths" -> ENTITIES;
+                case "chat", "chats", "command", "commands", "command_block", "session", "sessions" -> UNSUPPORTED;
+                // any other "#<cause>" (fire, water, lava, tnt, explosion, piston, hopper, ...) can only
+                // ever match a co_block row, which is what the query's action filter does
+                default -> prefixed ? BLOCKS : UNSUPPORTED;
+            };
+        }
+    }
+
+    /**
+     * Whether the state is the transient medium a #fire/#water/#lava row leaves behind. Fire burns out
+     * and flowing water or lava disappears once it settles, so a row that expects such a state stayed
+     * "skipped" forever although it can be replayed.
+     */
+    private static boolean isTransientMedium(BlockState state) {
+        return state.getBlock() == Blocks.FIRE || state.getBlock() == Blocks.SOUL_FIRE
+                || state.getBlock() == Blocks.WATER || state.getBlock() == Blocks.LAVA;
+    }
+
+    /**
+     * Finds the #piston rows whose counterpart is missing from the plan. A piston move is written as
+     * two rows sharing one timestamp (the "from" and the "to" position, with swapped states), and a
+     * b:/r: filter or the result limit can drop one of them. Replaying a single half either leaves the
+     * moved block at its destination and puts a copy back at the source, or deletes it.
+     */
+    private static Set<Long> findUnpairedPistonRows(List<Map.Entry<PosKey, List<DatabaseManager.BlockLog>>> chains) {
+        Map<String, List<DatabaseManager.BlockLog>> byMove = new LinkedHashMap<>();
+        for (Map.Entry<PosKey, List<DatabaseManager.BlockLog>> entry : chains) {
+            for (DatabaseManager.BlockLog log : entry.getValue()) {
+                if (!"#piston".equals(log.action())) continue;
+                byMove.computeIfAbsent(log.wid() + '@' + log.time(), k -> new ArrayList<>()).add(log);
+            }
+        }
+        Set<Long> unpaired = new HashSet<>();
+        for (List<DatabaseManager.BlockLog> rows : byMove.values()) {
+            boolean[] paired = new boolean[rows.size()];
+            for (int i = 0; i < rows.size(); i++) {
+                if (paired[i]) continue;
+                for (int j = i + 1; j < rows.size(); j++) {
+                    if (paired[j]) continue;
+                    DatabaseManager.BlockLog a = rows.get(i);
+                    DatabaseManager.BlockLog b = rows.get(j);
+                    if (a.x() == b.x() && a.y() == b.y() && a.z() == b.z()) continue;
+                    if (Objects.equals(a.oldData(), b.newData()) && Objects.equals(a.newData(), b.oldData())) {
+                        paired[i] = true;
+                        paired[j] = true;
+                        break;
+                    }
+                }
+            }
+            for (int i = 0; i < rows.size(); i++) {
+                if (!paired[i]) unpaired.add(rows.get(i).id());
+            }
+        }
+        return unpaired.isEmpty() ? Set.of() : unpaired;
     }
 
     // ------------------------------------------------------------------
@@ -722,6 +1116,9 @@ public final class RollbackManager {
         for (DatabaseManager.SignLog log : signLogs) {
             chains.computeIfAbsent(PosKey.of(log.wid(), log.x(), log.y(), log.z()), k -> new ArrayList<>()).add(log);
         }
+        long deadline = System.nanoTime() + SIGN_HISTORY_BUDGET_NANOS;
+        int queries = 0;
+        int deferred = 0;
         for (Map.Entry<PosKey, List<DatabaseManager.SignLog>> entry : chains.entrySet()) {
             List<DatabaseManager.SignLog> chain = entry.getValue();
             PosKey key = entry.getKey();
@@ -729,6 +1126,18 @@ public final class RollbackManager {
             if (isRestore) {
                 target = chain.get(0).data();
             } else {
+                // One query per position inside the read pool used to mean 500 statements for 500
+                // signs, with every other lookup of the server queued behind them. The per-position
+                // queries are capped and paced now: the positions that no longer fit stay unresolved
+                // (and are reported as skipped) instead of stalling the pool.
+                boolean outOfBudget = queries > 0 && queries % SIGN_HISTORY_BATCH == 0
+                        && System.nanoTime() > deadline;
+                if (queries >= MAX_SIGN_HISTORY_QUERIES || outOfBudget) {
+                    deferred++;
+                    targets.add(new SignTarget(key, null));
+                    continue;
+                }
+                queries++;
                 DatabaseManager.SignLog oldest = chain.get(chain.size() - 1);
                 List<DatabaseManager.SignLog> history = mod.database()
                         .querySignHistory(key.wid(), key.x(), key.y(), key.z(), SIGN_HISTORY_LIMIT);
@@ -744,6 +1153,10 @@ public final class RollbackManager {
                 }
             }
             targets.add(new SignTarget(key, target));
+        }
+        if (deferred > 0) {
+            CoreProtectFabric.LOGGER.warn("[CoreProtect] Sign text of {} of {} position(s) could not be resolved within {} quer(y/ies)/{} ms; those positions are reported as skipped.",
+                    deferred, chains.size(), queries, SIGN_HISTORY_BUDGET_NANOS / 1_000_000L);
         }
         return targets;
     }
@@ -781,6 +1194,25 @@ public final class RollbackManager {
      */
     private static int addItems(Container inv, ItemStack remaining, ServerLevel world, BlockPos pos,
                                 Job job, String wid) {
+        int stored = storeInContainer(inv, remaining);
+        if (!remaining.isEmpty()) {
+            if (job != null) {
+                // container=false: the overflow lies on the ground, so the undo picks it up instead of
+                // storing it in a container a second time
+                job.worldItemUndos.add(new WorldItemUndo(wid, pos, BuiltInRegistries.ITEM.getKey(remaining.getItem()).toString(),
+                        remaining.getCount(), true, ItemStackCodec.encodeIdentity(remaining, world.registryAccess()), false));
+            }
+            dropStack(world, pos, remaining);
+        }
+        return stored;
+    }
+
+    /**
+     * Stores as much of {@code remaining} as fits and returns the stored count; what does not fit stays
+     * in {@code remaining}. The undo uses this to put a stack back into the container a rollback
+     * emptied, where the part that does not fit still has to be handled.
+     */
+    private static int storeInContainer(Container inv, ItemStack remaining) {
         int stored = 0;
         for (int i = 0; i < inv.getContainerSize() && !remaining.isEmpty(); i++) {
             ItemStack slot = inv.getItem(i);
@@ -794,21 +1226,22 @@ public final class RollbackManager {
             } else if (ItemStack.isSameItemSameComponents(slot, remaining) && slot.getCount() < slot.getMaxStackSize()) {
                 int move = Math.min(remaining.getCount(), slot.getMaxStackSize() - slot.getCount());
                 slot.grow(move);
-                // write the mutated stack back: setItem is what marks the container dirty, so a
+                // write the mutated stack back: setStack is what marks the inventory dirty, so a
                 // save right after a rollback keeps the merged stack and viewers see it
                 inv.setItem(i, slot);
                 remaining.shrink(move);
                 stored += move;
             }
         }
-        if (!remaining.isEmpty()) {
-            if (job != null) {
-                job.worldItemUndos.add(new WorldItemUndo(wid, pos, BuiltInRegistries.ITEM.getKey(remaining.getItem()).toString(),
-                        remaining.getCount(), true, ItemStackCodec.encodeIdentity(remaining, world.registryAccess())));
-            }
-            dropStack(world, pos, remaining);
-        }
         return stored;
+    }
+
+    /** Whether the container holds anything at all. */
+    private static boolean hasItems(Container inv) {
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            if (!inv.getItem(i).isEmpty()) return true;
+        }
+        return false;
     }
 
     /**
@@ -846,15 +1279,25 @@ public final class RollbackManager {
      * (Handing them to the command's operator was worse: a console rollback dropped them into the
      * void, and the items were never part of the undo record.)
      */
-    private static void ejectInventory(Container inv, ServerLevel world, BlockPos pos, Job job, String wid) {
+    /**
+     * The inventory owned by the block at {@code pos} itself, never the other half of a double
+     * chest: replacing one half of a chest must not empty the half that stays in place.
+     */
+    private static Container ownedContainer(ServerLevel world, BlockPos pos) {
+        return world.getBlockEntity(pos) instanceof Container inv ? inv : null;
+    }
+
+    private static void ejectContainer(Container inv, ServerLevel world, BlockPos pos, Job job, String wid) {
         for (int i = 0; i < inv.getContainerSize(); i++) {
             ItemStack stack = inv.getItem(i);
             if (stack.isEmpty()) continue;
             inv.setItem(i, ItemStack.EMPTY);
             if (job != null) {
+                // container=true: the undo puts the stack back into the container the rollback restored
+                // instead of deleting it from the ground, so rollback + undo nets out to zero.
                 job.worldItemUndos.add(new WorldItemUndo(wid, pos,
                         BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(), true,
-                        ItemStackCodec.encodeIdentity(stack, world.registryAccess())));
+                        ItemStackCodec.encodeIdentity(stack, world.registryAccess()), true));
             }
             dropStack(world, pos, stack);
         }
@@ -892,7 +1335,7 @@ public final class RollbackManager {
         int remaining = amount;
         while (remaining > 0) {
             int move = Math.min(remaining, max);
-            drop(world, pos, template.copyWithCount(move));
+            dropItem(world, pos, template.copyWithCount(move));
             remaining -= move;
         }
     }
@@ -902,7 +1345,7 @@ public final class RollbackManager {
         dropItems(world, pos, stack, stack.getCount());
     }
 
-    private static void drop(ServerLevel world, BlockPos pos, ItemStack stack) {
+    private static void dropItem(ServerLevel world, BlockPos pos, ItemStack stack) {
         world.addFreshEntity(new ItemEntity(world, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5, stack));
     }
 
@@ -961,8 +1404,24 @@ public final class RollbackManager {
             players.add(entry.getKey().toString(), writeOperation(entry.getValue()));
         }
         root.add("players", players);
+        // Write a temporary file and move it into place: Files.writeString() truncated the record file
+        // first, so a crash (or a force killed server) during the write left an empty or half written
+        // file behind and every player's undo record was gone on the next start.
+        Path target = undoFilePath();
         try {
-            Files.writeString(undoFilePath(), root.toString());
+            Path directory = target.getParent();
+            if (directory != null) {
+                Files.createDirectories(directory);
+            }
+            Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
+            Files.writeString(temporary, root.toString());
+            try {
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // not every filesystem supports an atomic replace; a single move is still better than
+                // writing the record file in place
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (Exception e) {
             CoreProtectFabric.LOGGER.warn("[CoreProtect] Failed to store the undo record", e);
         }
@@ -998,6 +1457,9 @@ public final class RollbackManager {
             o.addProperty("item", u.item());
             o.addProperty("amount", u.amount());
             o.addProperty("added", u.added());
+            // whether the stack came out of a container the rollback replaced: the undo puts it back
+            // into the restored container instead of deleting it from the ground
+            o.addProperty("container", u.container());
             if (u.nbt() != null) {
                 o.addProperty("nbt", u.nbt());
             }
@@ -1030,7 +1492,7 @@ public final class RollbackManager {
         for (JsonElement e : array(o, "world_items")) {
             JsonObject b = e.getAsJsonObject();
             worldItems.add(new WorldItemUndo(string(b, "w"), position(b), string(b, "item"), integer(b, "amount"),
-                    bool(b, "added"), string(b, "nbt")));
+                    bool(b, "added"), string(b, "nbt"), bool(b, "container")));
         }
         List<SignUndo> signs = new ArrayList<>();
         for (JsonElement e : array(o, "signs")) {

@@ -2,6 +2,7 @@ package net.coreprotect.fabric.mixin;
 
 import net.coreprotect.fabric.CoreProtectFabric;
 import net.coreprotect.fabric.database.DatabaseManager;
+import net.coreprotect.fabric.util.ItemStackCodec;
 import net.coreprotect.fabric.util.TimeUtil;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -35,26 +36,39 @@ public abstract class ItemEntityPickupMixin {
     @Unique
     private int coreprotect$beforeCount;
 
+    /**
+     * Reference to the stack the entity carried before the pickup. Only a reference, never a
+     * copy: the NBT has to be read after the fact (L3-17), and a fully absorbed stack has its
+     * original count restored before the entity is discarded - the item stack object and its
+     * components survive that, so encoding once at RETURN is enough.
+     */
+    @Unique
+    private ItemStack coreprotect$beforeStack;
+
     @Inject(method = "onPlayerCollision", at = @At("HEAD"))
     private void coreprotect$capturePickup(PlayerEntity player, CallbackInfo ci) {
-        // Only the item type and the count are remembered: copying the whole stack here
-        // allocated an ItemStack on every collision tick, including the (much more common)
+        // Only the item type, the count and a reference are remembered: copying the whole stack
+        // here allocated an ItemStack on every collision tick, including the (much more common)
         // ticks where nothing is picked up at all.
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null || !mod.config().logging.item || !(player instanceof ServerPlayerEntity)) {
             coreprotect$beforeItem = null;
+            coreprotect$beforeStack = null;
             return;
         }
         ItemStack stack = ((ItemEntity) (Object) this).getStack();
         coreprotect$beforeItem = stack.isEmpty() ? null : stack.getItem();
+        coreprotect$beforeStack = stack.isEmpty() ? null : stack;
         coreprotect$beforeCount = stack.getCount();
     }
 
     @Inject(method = "onPlayerCollision", at = @At("RETURN"))
     private void coreprotect$onPickup(PlayerEntity player, CallbackInfo ci) {
         Item before = coreprotect$beforeItem;
+        ItemStack beforeStack = coreprotect$beforeStack;
         int beforeCount = coreprotect$beforeCount;
         coreprotect$beforeItem = null;
+        coreprotect$beforeStack = null;
         coreprotect$beforeCount = 0;
         if (before == null) return;
         CoreProtectFabric mod = CoreProtectFabric.instance();
@@ -72,10 +86,16 @@ public abstract class ItemEntityPickupMixin {
         }
         ServerWorld world = sp.getEntityWorld();
         BlockPos pos = ((ItemEntity) (Object) this).getBlockPos();
+        // L3-17: the pickup row used to store only the item id, so a picked-up enchanted sword,
+        // shulker box or written book could not be identified afterwards - the rollback of an
+        // item transaction had nothing to restore. Encode the components as SNBT like the drop
+        // path does (PlayerEntityDropMixin).
+        String nbt = beforeStack == null ? null
+                : ItemStackCodec.encodeIdentity(beforeStack, world.getRegistryManager());
         mod.database().insertItemAsync(new DatabaseManager.ItemLog(
                 0, TimeUtil.now(), sp.getGameProfile().name(),
                 world.getRegistryKey().getValue().toString(),
                 pos.getX(), pos.getY(), pos.getZ(), "+",
-                Registries.ITEM.getId(before).toString(), taken));
+                Registries.ITEM.getId(before).toString(), taken, nbt));
     }
 }

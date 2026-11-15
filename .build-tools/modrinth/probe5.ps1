@@ -5,11 +5,16 @@
     "not a valid variant for game_versions" for game version 9.99) and adds one field
     at a time with the real game version. Any case that unexpectedly succeeds prints
     MUST BE DELETED with the new version id.
+
+    READ-ONLY BY DEFAULT (audit L5-16): running this script as-is only prints the cases
+    that would be sent and exits with PROBE5_PREVIEW_DONE. Nothing is uploaded and no
+    version is created unless -YesICreateAVersion is passed explicitly.
 #>
 [CmdletBinding()]
 param(
     [string]$Token,
-    [string]$Root
+    [string]$Root,
+    [switch]$YesICreateAVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +26,29 @@ $api = 'https://api.modrinth.com/v2'
 $ua = 'CNTianCheng/coreprotect-fabric (https://github.com/CNTianCheng/coreprotect-fabric)'
 if (-not $Root) { $Root = (Resolve-Path (Join-Path $here '..\..')).Path }
 
+# The cases are data so that the preview below and the real run can never drift apart.
+$realJar = Join-Path $Root 'coreprotect-fabric-1.21\build\libs\coreprotect-fabric-1.21-1.9.0.jar'
+$cases = @(
+    [pscustomobject]@{ Label = 'A minimal + real mc 1.21';                    Mc = 1; Extra = $null;                         RealFile = $false },
+    [pscustomobject]@{ Label = 'B minimal + real mc + status listed';         Mc = 1; Extra = @{ status = 'listed' };        RealFile = $false },
+    [pscustomobject]@{ Label = 'C minimal + real mc + environment';           Mc = 1; Extra = @{ environment = 'dedicated_server_only' }; RealFile = $false },
+    [pscustomobject]@{ Label = 'D minimal + real mc + real 13.6MB jar';       Mc = 1; Extra = $null;                         RealFile = $true },
+    [pscustomobject]@{ Label = 'E bogus mc + status listed (control)';        Mc = 2; Extra = @{ status = 'listed' };        RealFile = $false }
+)
+
+if (-not $YesICreateAVersion) {
+    Write-Host '--- probe5 PREVIEW - nothing is sent, nothing is created ---'
+    Write-Host 'Pass -YesICreateAVersion to really POST these; every created version must be deleted afterwards.'
+    foreach ($c in $cases) {
+        $fields = '(payload as-is)'
+        if ($c.Extra) { $fields = ($c.Extra.Keys | Sort-Object | ForEach-Object { "$_=$($c.Extra[$_])" }) -join ' ' }
+        $file = if ($c.RealFile) { [System.IO.Path]::GetFileName($realJar) } else { 'dummy.jar (1 KB)' }
+        Write-Host ("  {0,-40} mc={1} file={2} extra={3}" -f $c.Label, $c.Mc, $file, $fields)
+    }
+    Write-Host 'PROBE5_PREVIEW_DONE'
+    return
+}
+
 if (-not $Token) {
     foreach ($line in [System.IO.File]::ReadAllLines((Join-Path $here 'token.txt'))) {
         $candidate = $line.Trim()
@@ -29,7 +57,6 @@ if (-not $Token) {
 }
 
 $changelog = [System.IO.File]::ReadAllText((Join-Path $here 'changelog-1.9.0.md'), [System.Text.Encoding]::UTF8)
-$realJar = Join-Path $Root 'coreprotect-fabric-1.21\build\libs\coreprotect-fabric-1.21-1.9.0.jar'
 
 # A throwaway 1 KB "jar" for the cases that only care about the payload: the API answers
 # 400 "Unable to read Zip Archive" for it, which is exactly what those cases need.
@@ -99,9 +126,7 @@ function Send-Case {
 }
 
 Write-Host '--- probe5 (every success must be deleted afterwards) ---'
-Send-Case -Label 'A minimal + real mc 1.21' -Mc 1
-Send-Case -Label 'B minimal + real mc + status listed' -Mc 1 -Extra @{ status = 'listed' }
-Send-Case -Label 'C minimal + real mc + environment' -Mc 1 -Extra @{ environment = 'dedicated_server_only' }
-Send-Case -Label 'D minimal + real mc + real 13.6MB jar' -Mc 1 -RealFile
-Send-Case -Label 'E bogus mc + status listed (control)' -Mc 2 -Extra @{ status = 'listed' }
+foreach ($c in $cases) {
+    Send-Case -Label $c.Label -Mc $c.Mc -Extra $c.Extra -RealFile:$c.RealFile
+}
 Write-Host 'PROBE5_DONE'

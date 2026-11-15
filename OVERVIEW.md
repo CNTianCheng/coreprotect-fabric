@@ -39,14 +39,14 @@
 
 ### 4. 检查模式（Inspect）
 
-`/co inspect` 开启后：**左键**查看方块历史、**右键**查看容器交易或相邻方块、**放置方块**对该方块类型执行查询；检查模式下无法破坏方块。
+`/co inspect` 开启后：**左键**查看方块历史、**右键**查看容器交易或相邻方块、**手持方块右键**对该方块类型执行查询（不放置方块）；检查模式下无法破坏方块。
 
 ### 5. 数据维护与多语言
 
 - `/co purge t:<时间>` 清理旧数据、`/co reload` 热重载、`/co status` 查看统计
 - **五种语言**：English / 简体中文 / 繁體中文 / 日本語 / Русский，自动跟随客户端语言，可 `/co language <代码>` 手动切换（按玩家持久化）
 
-## 1.21 版增强功能（v1.9.1 旗舰版）
+## 1.21 版增强功能（v1.9.4 旗舰版）
 
 `coreprotect-fabric-1.21/` 工程持续迭代，在共有功能之上新增：
 
@@ -66,16 +66,19 @@
 | v1.8.0 | 崩溃防护：WAL 提交每次刷盘（synchronous=full）、异常关闭检测 + 启动时 quick_check 完整性校验、周期性 WAL 检查点 |
 | v1.8.1 | 断电级防护：定期在线热备份（VACUUM INTO，默认 6 小时）、检测到损坏时自动从备份恢复（损坏原件另存），读连接代际自动重开 |
 | v1.8.2 | 三个完整功能版（1.21 / 1.21.11 / 26.1.2）**缺陷修复版**：`#fire` 失效、告示牌正反面、掉落/拾取幽灵记录、回滚安全上限与容器撤销、`/co undo` 误撤销、`a:container` 等 CoreProtect 兼容写法、`e:`/半径/大小写过滤、崩溃标记与关库时序、bStats 退出与更新检查刷屏等（详见各版本 Release 说明） |
+| v1.9.4 | 第二轮深度复查共 84 条：活塞记录坐标错位与 `#fire` 窗口泄漏两项严重缺陷、回档/撤销回到净零（容器内容带完整组件进 undo）、双箱与双漏斗重复记账、写入失败可见计数、带签名命令重新记录、密码类命令黑名单等 |
+| v1.9.3 | 安全与数据完整性修复共 60 条：权限校验加固（permissions.lookupLevel 默认 1、去除 coreprotect.* 前缀、分组按 UUID 匹配）、回滚/恢复按坐标精确重放并保留容器 NBT、撤销记录每 5 秒刷盘、聊天与告示牌过滤 § |
+| v1.9.2 | 大幅降低磁盘压力：记录批量写入（每 250 毫秒或 1000 行提交一次）、查询全部移出服务器主线程 |
 | v1.9.1 | 新增完整俄语（ru_ru）翻译：114 个键与 en_us 完全一致，`{0}` 占位符全部保留；`/co language ru_ru` 手动切换，客户端为俄语时自动生效 |
 | v1.9.0 | 数据库体积大幅压缩（v3 schema）：user/world/action 与方块状态全部字典化，每张日志表仅保留 2 个索引，41.7 万行实测 46.38MB → 24.32MB（−47.6%，每行 116.6 → 61.2 字节）；旧库首次启动自动迁移并保留 `coreprotect.db.bak-v2` 备份 |
 
 ## 版本矩阵（16 个构建）
 
-全部构建要求 **Fabric Loader ≥ 0.16 + Fabric API**；Java 要求分两档（1.21.x 为 21，26.x 为 25）。
+构建要求按分支不同（以各自 `fabric.mod.json` 为准）：**1.21** 需 Fabric Loader ≥ 0.16.9 + Fabric API ≥ 0.102.0+1.21；**1.21.11** 需 Loader ≥ 0.19.3 + API ≥ 0.141.6+1.21.11；**26.1.2** 需 Loader ≥ 0.19.3 + API ≥ 0.155.2+26.1.2。Java 要求分两档（1.21.x 为 21，26.x 为 25）。
 
 | Minecraft | 模组版本 | Jar 文件名 | 工程目录 | Java |
 |---|---|---|---|---|
-| 1.21 | 1.9.1（旗舰） | `coreprotect-fabric-1.21-1.9.1.jar` | `coreprotect-fabric-1.21/` | 21 |
+| 1.21 | 1.9.4（旗舰） | `coreprotect-fabric-1.21-1.9.4.jar` | `coreprotect-fabric-1.21/` | 21 |
 | 1.21.1 | 1.0.0 | `coreprotect-fabric-1.0.0.jar` | `coreprotect-fabric/` | 21 |
 | 1.21.2 | 1.0.0 | `coreprotect-fabric-1.21.2-1.0.0.jar` | `coreprotect-fabric-1.21.2/` | 21 |
 | 1.21.3 | 1.0.0 | `coreprotect-fabric-1.21.3-1.0.0.jar` | `coreprotect-fabric-1.21.3/` | 21 |
@@ -86,23 +89,23 @@
 | 1.21.8 | 1.0.0 | `coreprotect-fabric-1.21.8-1.0.0.jar` | `coreprotect-fabric-1.21.8/` | 21 |
 | 1.21.9 | 1.0.0 | `coreprotect-fabric-1.21.9-1.0.0.jar` | `coreprotect-fabric-1.21.9/` | 21 |
 | 1.21.10 | 1.0.0 | `coreprotect-fabric-1.21.10-1.0.0.jar` | `coreprotect-fabric-1.21.10/` | 21 |
-| 1.21.11 | 1.9.1 | `coreprotect-fabric-1.21.11-1.9.1.jar` | `coreprotect-fabric-1.21.11/` | 21 |
+| 1.21.11 | 1.9.4 | `coreprotect-fabric-1.21.11-1.9.4.jar` | `coreprotect-fabric-1.21.11/` | 21 |
 | 26.1 | 1.0.0 | `coreprotect-fabric-26.1-1.0.0.jar` | `coreprotect-fabric-26.1/` | 25 |
 | 26.1.1 | 1.0.0 | `coreprotect-fabric-26.1.1-1.0.0.jar` | `coreprotect-fabric-26.1.1/` | 25 |
-| 26.1.2 | 1.9.1 | `coreprotect-fabric-26.1.2-1.9.1.jar` | `coreprotect-fabric-26.1.2/` | 25 |
+| 26.1.2 | 1.9.4 | `coreprotect-fabric-26.1.2-1.9.4.jar` | `coreprotect-fabric-26.1.2/` | 25 |
 | 26.2 | 1.0.0 | `coreprotect-fabric-26.2-1.0.0.jar` | `coreprotect-fabric-26.2/` | 25 |
 
-> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。**1.21、1.21.11、26.1.2 均为 v1.9.1 完整功能版**（命令、记录范围、配色、数据库结构与崩溃/断电防护完全一致）；其余版本为 v1.0.0 核心功能集。各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
+> 说明：1.21.2 ~ 1.21.11 使用 yarn 映射，26.x 使用官方 mojmap 映射。**1.21、1.21.11、26.1.2 均为 v1.9.4 完整功能版**（命令、记录范围、配色、数据库结构与崩溃/断电防护完全一致）；其余版本为 v1.0.0 核心功能集。各工程目录内均附有对应版本的 `OVERVIEW.md` / `OVERVIEW_EN.md` 与 `README.md`。
 
 ## 安装
 
 1. 按上表选择与你服务器 **Minecraft 版本严格对应**的 Jar（1.21.x 需要 **Java 21**，26.x 需要 **Java 25**）。
-2. 服务端安装 **Fabric Loader ≥ 0.16** 与 **Fabric API**。
+2. 服务端安装 **Fabric Loader** 与对应版本的 **Fabric API**（1.21：Loader ≥ 0.16.9、API ≥ 0.102.0+1.21；1.21.11：Loader ≥ 0.19.3、API ≥ 0.141.6+1.21.11；26.1.2：Loader ≥ 0.19.3、API ≥ 0.155.2+26.1.2）。
 3. 将 Jar 放入 `mods/`，启动服务器。首次启动自动在 `config/coreprotect-fabric.json` 生成配置、在游戏目录创建 SQLite 数据库。
 
 ## 技术架构（全系列共享）
 
-- **事件采集**：Fabric API 事件（破坏/放置/右键/击杀/聊天/会话）+ Mixin 挂钩自然事件，通过线程局部"原因归因"把无玩家参与的世界变化归因到 `#fire`、`#water` 等虚拟用户（best-effort，`defaultRequire: 0`）
+- **事件采集**：Fabric API 事件（破坏/放置/右键/击杀/聊天/会话）+ Mixin 挂钩自然事件，通过线程局部"原因归因"把无玩家参与的世界变化归因到 `#fire`、`#water` 等虚拟用户（强制挂钩，`defaultRequire: 1`：某个钩子失效会直接导致开服失败，而不是静默丢记录）
 - **存储**：SQLite（WAL 模式）单工作线程异步写入，主线程零阻塞；表结构贴近 CoreProtect：`co_block` / `co_container` / `co_entity` / `co_session` / `co_command` / `co_chat` / `co_user`，以及 v3 起新增的字典表 `co_state` / `co_name` / `co_world` / `co_action`（三个完整功能版另有 `co_item` / `co_sign`）
 - **回滚引擎**：同一位置取最新记录，"回滚取旧态、恢复取新态"，BlockState 对象级比较；容器物品操作先行，防止拆除容器时物品丢失
 - **翻译**：服务端按玩家解析语言，回退链：`/co language` 覆盖 → 客户端语言 → 配置默认 → `en_us`
@@ -111,7 +114,7 @@
 
 - 击杀记录不回滚（与原版 CoreProtect 一致）；大型回滚在主线程执行（受 `maxBlocks` 保护）
 - 容器回滚采用简化物品找回策略：被取走的物品优先从容器扣除并交还操作者，缺失部分补发
-- 自然事件挂钩为 best-effort：若未来游戏版本改动导致个别挂钩失效，仅失去对应记录，不影响其他功能
+- 自然事件挂钩为强制 Mixin（`defaultRequire: 1`）：若未来游戏版本改动导致某个挂钩失效，服务端启动会直接失败并报出该钩子，而不是静默丢失一类记录
 - 三个完整功能版（1.21 / 1.21.11 / 26.1.2）均已包含漏斗（`#hopper`）、投掷器/发射器（`#dropper`/`#dispenser`）、掉落物与告示牌编辑记录，以及 `/co i` 简写、权限组、`/co online`、数据保存限制；其余版本为 v1.0.0 核心功能集，不含上述内容
 
 ## 许可与致谢

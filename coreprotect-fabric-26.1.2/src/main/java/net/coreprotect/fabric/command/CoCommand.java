@@ -2,6 +2,8 @@ package net.coreprotect.fabric.command;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import com.mojang.brigadier.CommandDispatcher;
@@ -19,24 +21,14 @@ import net.coreprotect.fabric.rollback.RollbackManager;
 import net.coreprotect.fabric.util.Messages;
 import net.coreprotect.fabric.util.Permissions;
 import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.entity.HopperBlockEntity;
-import net.minecraft.world.level.block.entity.DropperBlockEntity;
-import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 import net.minecraft.world.entity.item.PrimedTnt;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.permissions.PermissionCheck;
 import net.minecraft.network.chat.Component;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.DispenserBlock;
-import net.minecraft.world.level.block.piston.PistonBaseBlock;
 
 import static net.minecraft.commands.Commands.argument;
 import static net.minecraft.commands.Commands.literal;
@@ -48,6 +40,10 @@ public final class CoCommand {
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         LiteralArgumentBuilder<CommandSourceStack> root = literal("co");
+        // Bare /co used to answer with vanilla's "Incomplete command": the parent node had no
+        // executes() of its own. It shows the help now, and so does every subcommand whose
+        // parameters are missing (L4-13).
+        root.executes(ctx -> help(ctx.getSource()));
         root.then(literal("help").requires(node(Permissions.NODE_HELP)).executes(ctx -> help(ctx.getSource())));
         root.then(literal("status").requires(node(Permissions.NODE_STATUS)).executes(ctx -> status(ctx.getSource())));
         root.then(literal("inspect").requires(node(Permissions.NODE_INSPECT))
@@ -71,15 +67,18 @@ public final class CoCommand {
                         .suggests(onlineSuggestions())
                         .executes(ctx -> onlineHistory(ctx.getSource(), StringArgumentType.getString(ctx, "params")))));
         root.then(literal("rollback").requires(node(Permissions.NODE_ROLLBACK))
+                .executes(ctx -> usage(ctx.getSource(), ROLLBACK_USAGE))
                 .then(argument("params", StringArgumentType.greedyString())
                         .suggests(paramSuggestions(ROLLBACK_KEYS))
                         .executes(ctx -> rollback(ctx.getSource(), StringArgumentType.getString(ctx, "params"), false))));
         root.then(literal("restore").requires(node(Permissions.NODE_RESTORE))
+                .executes(ctx -> usage(ctx.getSource(), RESTORE_USAGE))
                 .then(argument("params", StringArgumentType.greedyString())
                         .suggests(paramSuggestions(ROLLBACK_KEYS))
                         .executes(ctx -> rollback(ctx.getSource(), StringArgumentType.getString(ctx, "params"), true))));
         root.then(literal("undo").requires(node(Permissions.NODE_UNDO)).executes(ctx -> undo(ctx.getSource())));
         root.then(literal("purge").requires(node(Permissions.NODE_PURGE))
+                .executes(ctx -> usage(ctx.getSource(), PURGE_USAGE))
                 .then(argument("params", StringArgumentType.greedyString())
                         .suggests(paramSuggestions(PURGE_KEYS))
                         .executes(ctx -> purge(ctx.getSource(), StringArgumentType.getString(ctx, "params")))));
@@ -91,6 +90,7 @@ public final class CoCommand {
                         .suggests(languageSuggestions())
                         .executes(ctx -> languageSet(ctx.getSource(), StringArgumentType.getString(ctx, "code")))));
         root.then(literal("debug").requires(node(Permissions.NODE_DEBUG))
+                .executes(ctx -> usage(ctx.getSource(), DEBUG_USAGE))
                 .then(literal("natural").executes(ctx -> debugNatural(ctx.getSource()))));
 
         dispatcher.register(root);
@@ -102,14 +102,37 @@ public final class CoCommand {
         return s -> Permissions.has(s, permission);
     }
 
+    private static int usage(CommandSourceStack source, String usage) {
+        Messages.error(source, "coreprotect.error.usage", usage);
+        return 0;
+    }
+
     // ------------------------------------------------------------------
     // Parameter suggestions
     // ------------------------------------------------------------------
 
     private static final List<String> LOOKUP_KEYS = List.of("u:", "t:", "a:", "r:", "b:", "e:", "p:");
     private static final List<String> ROLLBACK_KEYS = List.of("u:", "t:", "a:", "r:", "b:", "e:");
-    private static final List<String> PURGE_KEYS = List.of("t:");
+    /**
+     * /co purge accepted only t: and silently dropped every other filter, so "purge u:Steve
+     * t:1d" deleted the whole server's history (L4-01). All filters the database can apply are
+     * offered now and passed through to the database.
+     */
+    private static final List<String> PURGE_KEYS = List.of("u:", "t:", "a:", "r:", "b:", "e:");
     private static final List<String> ONLINE_KEYS = List.of("t:", "p:");
+
+    // Command syntax only (no prose): shown through coreprotect.error.usage.
+    private static final String ROLLBACK_USAGE = "/co rollback u:<user> t:<time> [r:<radius>] [a:<action>] [b:<block>] [e:<exclude>]";
+    private static final String RESTORE_USAGE = "/co restore u:<user> t:<time> [r:<radius>] [a:<action>] [b:<block>] [e:<exclude>]";
+    private static final String PURGE_USAGE = "/co purge t:<time> [u:<user>] [a:<action>] [b:<block>] [e:<exclude>] [r:<radius>]";
+    private static final String DEBUG_USAGE = "/co debug natural";
+
+    /** Prints the values the parser had to clamp, so a narrowed scan is never mistaken for a full one. */
+    private static void reportNotices(CommandSourceStack source, ParamParser.ParseResult parse) {
+        for (ParamParser.Notice notice : parse.notices()) {
+            Messages.cmd(source, notice.key(), notice.args());
+        }
+    }
 
     /** Suggests key:value tokens (u:, t:, ...) and player names after u:. */
     private static SuggestionProvider<CommandSourceStack> paramSuggestions(List<String> keys) {
@@ -219,6 +242,7 @@ public final class CoCommand {
     }
 
     private static int help(CommandSourceStack source) {
+        CoreProtectFabric mod = CoreProtectFabric.instance();
         Messages.title(source, "coreprotect.help.header");
         Messages.helpLine(source, "coreprotect.help.line.help");
         Messages.helpLine(source, "coreprotect.help.line.inspect");
@@ -231,7 +255,15 @@ public final class CoCommand {
         Messages.helpLine(source, "coreprotect.help.line.reload");
         Messages.helpLine(source, "coreprotect.help.line.status");
         Messages.helpLine(source, "coreprotect.help.line.language");
+        // The list used to stop at these twelve lines: /co i, /coreprotect and the debug
+        // scenario command were not discoverable, and no permission level was mentioned (L4-13).
+        Messages.helpLine(source, "coreprotect.help.line.aliases");
+        Messages.helpLine(source, "coreprotect.help.line.debug");
         Messages.helpLine(source, "coreprotect.help.line.time");
+        if (mod != null) {
+            CoreProtectConfig.Permissions perms = mod.config().permissions;
+            Messages.cmd(source, "coreprotect.help.levels", perms.lookupLevel, perms.adminLevel);
+        }
         return 1;
     }
 
@@ -239,9 +271,15 @@ public final class CoCommand {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         DatabaseManager db = mod.database();
         Translator t = mod.translator();
-        // The eight table counts used to run on the tick thread (8 x get(30 s)); the whole
-        // report is now printed from the callback, so the ordering stays the same.
-        LookupService.query(source, db::countsSequential, counts -> {
+        // The absolute database path, the eleven logging switches, the permission-group count and
+        // the write statistics are operational details; they were shown to every lookupLevel
+        // player (default 1 = moderators) instead of the admin tier (L4-18).
+        boolean detailed = Permissions.has(source, Permissions.NODE_ADMIN);
+        // The counts come from the budgeted, parallel implementation: the sequential variant has
+        // no deadline at all, so eight serial COUNT(*) queries held a console command for as long
+        // as the database needed (L4-09 / L1-08). The wait matches that budget instead of giving
+        // up after 10 s while the counts keep running.
+        LookupService.query(source, db::counts, counts -> {
             long[] rows;
             if (counts == null) {
                 // the whole report failed: show "n/a" instead of a row of convincing zeros
@@ -256,32 +294,38 @@ public final class CoCommand {
                 shown[i] = rows[i] < 0 ? "n/a" : Long.toString(rows[i]);
             }
             ServerPlayer p = source.getPlayer();
-            String on = t.get(p, "coreprotect.word.on");
-            String off = t.get(p, "coreprotect.word.off");
-            CoreProtectConfig.Logging log = mod.config().logging;
             Messages.title(source, "coreprotect.status.header");
             Messages.statusLine(source, "coreprotect.status.version", CoreProtectFabric.MOD_VERSION);
-            Messages.statusLine(source, "coreprotect.status.database", String.valueOf(db.dbPath()));
+            if (detailed) {
+                Messages.statusLine(source, "coreprotect.status.database", String.valueOf(db.dbPath()));
+            }
             Messages.statusLine(source, "coreprotect.status.counts", shown);
             Messages.statusLine(source, "coreprotect.status.language",
                     t.defaultLanguage(), String.join(", ", t.available()));
-            Messages.statusLine(source, "coreprotect.status.logging",
-                    log.block ? on : off, log.container ? on : off, log.entity ? on : off,
-                    log.chat ? on : off, log.command ? on : off, log.session ? on : off,
-                    log.natural ? on : off, log.hopper ? on : off, log.dispenser ? on : off,
-                    log.item ? on : off, log.signEdit ? on : off);
-            Messages.statusLine(source, "coreprotect.status.permgroups",
-                    mod.config().permissionGroups.enabled ? on : off, Permissions.groupCount());
             CoreProtectConfig.DataRetention r = mod.config().dataRetention;
             if (r != null && r.enabled && r.maxDays > 0) {
                 Messages.statusLine(source, "coreprotect.status.retention.on", r.maxDays);
             } else {
                 Messages.statusLine(source, "coreprotect.status.retention.off");
             }
-            // Rows that were dropped (queue full / database closed) are otherwise invisible
-            long[] writes = db.writeStats();
-            Messages.statusLine(source, "coreprotect.status.writes", writes[0], writes[1], writes[2]);
-        });
+            if (detailed) {
+                String on = t.get(p, "coreprotect.word.on");
+                String off = t.get(p, "coreprotect.word.off");
+                CoreProtectConfig.Logging log = mod.config().logging;
+                Messages.statusLine(source, "coreprotect.status.logging",
+                        log.block ? on : off, log.container ? on : off, log.entity ? on : off,
+                        log.chat ? on : off, log.command ? on : off, log.session ? on : off,
+                        log.natural ? on : off, log.hopper ? on : off, log.dispenser ? on : off,
+                        log.item ? on : off, log.signEdit ? on : off);
+                Messages.statusLine(source, "coreprotect.status.permgroups",
+                        mod.config().permissionGroups.enabled ? on : off, Permissions.groupCount());
+                // Rows that were dropped (queue full / database closed) are otherwise invisible
+                long[] writes = db.writeStats();
+                Messages.statusLine(source, "coreprotect.status.writes", writes[0], writes[1], writes[2]);
+            } else {
+                Messages.cmd(source, "coreprotect.status.restricted", mod.config().permissions.adminLevel);
+            }
+        }, LookupService.STATUS_TIMEOUT_MS);
         return 1;
     }
 
@@ -312,6 +356,7 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        reportNotices(source, parse);
         if (c.user == null || c.user.isEmpty()) {
             Messages.error(source, "coreprotect.online.require_player");
             return 0;
@@ -388,6 +433,14 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        reportNotices(source, parse);
+        // The lookup permission used to depend on the command only, so a player allowed to read
+        // blocks could read chat and command rows - which is where /login passwords live (L4-06).
+        // The node for the selected action is checked instead.
+        if (!Permissions.has(source, Permissions.lookupNodeFor(c.action))) {
+            Messages.error(source, "coreprotect.error.permission");
+            return 0;
+        }
         if (!applyRadius(source, c)) return 0;
         return LookupService.run(source, c);
     }
@@ -399,10 +452,15 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        reportNotices(source, parse);
         // Like the CoreProtect plugin, u: is optional: a rollback/restore may target every
         // user within a time/radius/block filter. Requiring no filter at all is still refused.
+        // c.time is pre-filled with the configured default window while parsing, so the time part
+        // of that guard was always true: "/co rollback b:stone" silently rewrote every player's
+        // blocks of the last week (L4-05). Only an explicit t: (or an explicit r:) counts now.
         if (c.user == null || c.user.isEmpty()) {
-            boolean filtered = c.time > 0 || c.radius > 0 || c.block != null || c.exclude != null;
+            c.user = null;
+            boolean filtered = parse.explicitTime() || parse.explicitRadius();
             if (!filtered) {
                 Messages.error(source, "coreprotect.error.missing_user");
                 return 0;
@@ -450,18 +508,27 @@ public final class CoCommand {
             return 0;
         }
         Criteria c = parse.criteria();
+        reportNotices(source, parse);
         if (c.time <= 0) {
             Messages.error(source, "coreprotect.purge.require_time");
             return 0;
         }
+        // r: needs a real center; without this the delete would quietly ignore the radius.
+        if (!applyRadius(source, c)) return 0;
+        // The whole filter set is handed to the database now. It used to be reduced to the time
+        // cutoff alone, so "/co purge u:Steve t:1d" deleted every player's data of the last day
+        // and reported it as a successful purge of the requested user (L4-01). Because the
+        // operation cannot be undone, the effective scope is echoed first.
+        Messages.cmd(source, "coreprotect.purge.scope", describePurgeScope(c));
         // Deleting old rows can take a while on a large database, so it runs on the read
         // pool and the result is reported from the callback instead of stalling the tick.
-        long before = c.time;
-        LookupService.query(source, 
-                () -> CoreProtectFabric.instance().database().purge(before),
+        LookupService.query(source,
+                () -> CoreProtectFabric.instance().database().purge(c),
                 rows -> {
                     if (rows == null) {
-                        Messages.error(source, "coreprotect.error.db", "database read failed");
+                        // A failing DELETE is a write problem; it used to be reported through the
+                        // generic "database read failed" text (L1-15).
+                        Messages.error(source, "coreprotect.purge.failed");
                         return;
                     }
                     Messages.success(source, "coreprotect.purge.complete", rows);
@@ -471,12 +538,50 @@ public final class CoCommand {
         return 1;
     }
 
+    /** ASCII summary of the filters a purge applies, e.g. {@code "t:86400s, u:Steve"}. */
+    private static String describePurgeScope(Criteria c) {
+        List<String> parts = new ArrayList<>();
+        parts.add("t:" + (net.coreprotect.fabric.util.TimeUtil.now() - c.time) + "s");
+        if (c.user != null && !c.user.isEmpty()) parts.add("u:" + c.user);
+        if (c.action != null && !c.action.isEmpty() && !"block".equals(c.action)) parts.add("a:" + c.action);
+        if (c.block != null) parts.add("b:" + c.block);
+        if (c.exclude != null) parts.add("e:" + c.exclude);
+        if (c.radius > 0) parts.add("r:" + c.radius);
+        return String.join(", ", parts);
+    }
+
     private static int reload(CommandSourceStack source) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
-        mod.config().load();
+        // A broken config file used to be reported as a successful reload, and the file's old
+        // values stayed in place without the caller learning about it (L4-07).
+        try {
+            mod.config().load();
+        } catch (RuntimeException e) {
+            Messages.error(source, "coreprotect.reload.failed", describeFailure(e));
+            return 0;
+        }
+        if (mod.config().lastLoadFailed()) {
+            Messages.error(source, "coreprotect.reload.failed", String.valueOf(mod.config().lastLoadError()));
+            return 0;
+        }
         mod.translator().load(mod.config().language);
+        // database.syncMode is applied to the live connections now instead of requiring a
+        // restart (contract F-9.2).
+        mod.database().applySyncMode();
         Messages.success(source, "coreprotect.reload.complete");
+        // Settings that are only read at startup cannot be applied here; say so instead of
+        // letting the caller believe the new values are active (L4-07).
+        java.util.List<String> restart = mod.config().restartRequired();
+        if (!restart.isEmpty()) {
+            Messages.cmd(source, "coreprotect.reload.restart_required", String.join(", ", restart));
+        }
         return 1;
+    }
+
+    /** Exception text for the reload error message; never the literal "null". */
+    private static String describeFailure(RuntimeException e) {
+        String message = e.getMessage();
+        return message == null || message.isBlank() ? e.getClass().getSimpleName() : message;
     }
 
     private static int languageList(CommandSourceStack source) {
@@ -500,7 +605,7 @@ public final class CoCommand {
         Translator t = mod.translator();
         if (code.equalsIgnoreCase("auto") || code.equalsIgnoreCase("default")) {
             t.setOverride(p.getUUID(), null);
-            mod.database().saveUserLanguageAsync(p.getGameProfile().name(), null);
+            mod.database().saveUserLanguageAsync(p.getGameProfile().name(), p.getUUID().toString(), null);
             Messages.cmd(source, "coreprotect.language.reset");
             return 1;
         }
@@ -509,11 +614,22 @@ public final class CoCommand {
             return 0;
         }
         t.setOverride(p.getUUID(), code);
-        mod.database().saveUserLanguageAsync(p.getGameProfile().name(), code);
+        mod.database().saveUserLanguageAsync(p.getGameProfile().name(), p.getUUID().toString(), code);
         Messages.cmd(source, "coreprotect.language.set", code);
         return 1;
     }
 
+    /** Forces (or releases) every chunk of the natural-test area, loading it synchronously. */
+    private static void forceChunks(ServerLevel world, int minX, int maxX, int minZ, int maxZ, boolean forced) {
+        for (int cx = minX; cx <= maxX; cx++) {
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                world.setChunkForced(cx, cz, forced);
+                if (forced) {
+                    world.getChunk(cx, cz);
+                }
+            }
+        }
+    }
     /**
      * Places fire/water/explosion scenarios to verify that natural block
      * events are logged (#fire, #water, #tnt). Useful after installation.
@@ -521,32 +637,53 @@ public final class CoCommand {
     private static int debugNatural(CommandSourceStack source) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         ServerLevel world = mod.server().overworld();
-        // Place scenarios around the world spawn so they sit inside the spawn chunks.
+        // Place scenarios around the world spawn so they sit inside the always-ticking spawn chunks.
         BlockPos ground = CoreProtectFabric.instance().server().getRespawnData().pos().below();
-        // 1.21.9+ / 26.x: chunks no longer tick without players and a setBlock into a chunk
-        // that is not loaded yet is dropped, so the area is force-loaded first and the
-        // scenarios are placed on the next server tick (by then the chunks really exist).
-        for (int cx = -1; cx <= 1; cx++) {
-            for (int cz = -1; cz <= 1; cz++) {
-                world.setChunkForced((ground.getX() >> 4) + cx, (ground.getZ() >> 4) + cz, true);
-            }
+        // Real fire, a real explosion and real fluids are created at the world spawn; say so
+        // before touching anything instead of only reporting where afterwards (L4-08).
+        Messages.cmd(source, "coreprotect.debug.natural_warning");
+        int baseX = ground.getX() >> 4;
+        int baseZ = ground.getZ() >> 4;
+        BlockPos fireBase;
+        // 1.21.9+: chunks no longer tick without players. Force-load the whole test area BEFORE
+        // placing anything, otherwise a setBlock into an unloaded chunk is dropped - and keep it
+        // loaded afterwards as well: the fire scenario only burns through its scheduled tick, so
+        // releasing the chunks immediately meant #fire never showed up unless a player happened
+        // to stand next to the fire. The piston scenario sits one chunk further out
+        // (ground.add(0, 1, 20)), which the old nine-chunk window did not cover at all.
+        final int minX = baseX - 1;
+        final int maxX = baseX + 1;
+        final int minZ = baseZ - 1;
+        final int maxZ = baseZ + 2;
+        forceChunks(world, minX, maxX, minZ, maxZ, true);
+        try {
+            fireBase = placeNaturalScenarios(world, ground);
+        } finally {
+            // A forced chunk flag is written into the save file, and the test chunks used to stay
+            // forced forever (they even survived a server restart). They are released again after
+            // sixty seconds instead (L4-08): fire only spreads through its scheduled tick (one every
+            // 30-40 ticks) and the hopper/dropper chain needs a few moves, so sixty seconds is long
+            // enough for both - and short enough to never become a permanent setting of the server.
+            CompletableFuture.delayedExecutor(60L, TimeUnit.SECONDS).execute(() -> {
+                CoreProtectFabric later = CoreProtectFabric.instance();
+                if (later == null || later.server() == null) return;
+                later.server().execute(() -> forceChunks(world, minX, maxX, minZ, maxZ, false));
+            });
         }
-        BlockPos fireBase = ground.offset(-8, 0, 8);
-        mod.server().execute(() -> placeNaturalScenarios(world, ground));
         Messages.cmd(source, "coreprotect.debug.natural_started", fireBase.getX(), fireBase.getZ());
         return 1;
     }
 
-    /** Places the natural-event test scenarios (runs one tick after the chunks were loaded). */
-    private static void placeNaturalScenarios(ServerLevel world, BlockPos ground) {
+    /** Places the fire/water/explosion/hopper/dropper/dispenser/piston scenarios; returns the fire base. */
+    private static BlockPos placeNaturalScenarios(ServerLevel world, BlockPos ground) {
         // fire burns the wool it sits on (kept far from the TNT scenario)
         BlockPos fireBase = ground.offset(-8, 0, 8);
-        world.setBlock(fireBase, Blocks.WHITE_WOOL.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(fireBase.above(), Blocks.FIRE.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(fireBase, net.minecraft.world.level.block.Blocks.WHITE_WOOL.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(fireBase.above(), net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
         // flowing water washes away the torch (kept far from the fire scenario)
         BlockPos waterBase = ground.offset(-5, 0, -5);
-        world.setBlock(waterBase.above(), Blocks.TORCH.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(waterBase.above(2), Blocks.WATER.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(waterBase.above(), net.minecraft.world.level.block.Blocks.TORCH.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(waterBase.above(2), net.minecraft.world.level.block.Blocks.WATER.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
         // direct TNT-style explosion destroys the surrounding grass
         BlockPos boom = ground.offset(6, 1, 0);
         PrimedTnt tnt = new PrimedTnt(world, boom.getX() + 0.5, boom.getY(), boom.getZ() + 0.5, null);
@@ -555,39 +692,40 @@ public final class CoCommand {
                 Level.ExplosionInteraction.TNT);
         // hopper above a chest: its contents are pushed into the chest -> #hopper transactions
         BlockPos hopperChest = ground.offset(0, 0, 10);
-        world.setBlock(hopperChest, Blocks.CHEST.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(hopperChest.above(), Blocks.HOPPER.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(hopperChest, net.minecraft.world.level.block.Blocks.CHEST.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(hopperChest.above(), net.minecraft.world.level.block.Blocks.HOPPER.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
         BlockEntity hopperBe = world.getBlockEntity(hopperChest.above());
-        if (hopperBe instanceof HopperBlockEntity hopper) {
-            hopper.setItem(0, new ItemStack(Items.DIAMOND, 3));
+        if (hopperBe instanceof net.minecraft.world.level.block.entity.HopperBlockEntity hopper) {
+            hopper.setItem(0, new ItemStack(net.minecraft.world.item.Items.DIAMOND, 3));
         }
         // powered dropper: ejects its contents forward -> #dropper transactions
         BlockPos dropperPos = ground.offset(0, 0, -10);
-        world.setBlock(dropperPos, Blocks.DROPPER.defaultBlockState()
-                .setValue(DispenserBlock.FACING, Direction.UP), Block.UPDATE_ALL);
-        world.setBlock(dropperPos.below(), Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(dropperPos, net.minecraft.world.level.block.Blocks.DROPPER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.DispenserBlock.FACING, net.minecraft.core.Direction.UP), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(dropperPos.below(), net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
         BlockEntity dropperBe = world.getBlockEntity(dropperPos);
-        if (dropperBe instanceof DropperBlockEntity dropper) {
-            dropper.setItem(0, new ItemStack(Items.EMERALD, 4));
+        if (dropperBe instanceof net.minecraft.world.level.block.entity.DropperBlockEntity dropper) {
+            dropper.setItem(0, new ItemStack(net.minecraft.world.item.Items.EMERALD, 4));
         }
         // powered dispenser: shoots arrows upward -> #dispenser transactions
         BlockPos dispenserPos = ground.offset(0, 0, -11);
-        world.setBlock(dispenserPos, Blocks.DISPENSER.defaultBlockState()
-                .setValue(DispenserBlock.FACING, Direction.UP), Block.UPDATE_ALL);
-        world.setBlock(dispenserPos.below(), Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(dispenserPos, net.minecraft.world.level.block.Blocks.DISPENSER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.DispenserBlock.FACING, net.minecraft.core.Direction.UP), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(dispenserPos.below(), net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
         BlockEntity dispenserBe = world.getBlockEntity(dispenserPos);
-        if (dispenserBe instanceof DispenserBlockEntity dispenser) {
-            dispenser.setItem(0, new ItemStack(Items.ARROW, 3));
+        if (dispenserBe instanceof net.minecraft.world.level.block.entity.DispenserBlockEntity dispenser) {
+            dispenser.setItem(0, new ItemStack(net.minecraft.world.item.Items.ARROW, 3));
         }
         // piston pushing a wool block (in the air, so the push always succeeds) -> #piston records
         BlockPos pistonBase = CoreProtectFabric.instance().server().getRespawnData().pos().offset(0, 1, 20);
         // clear the pushed block and its destination first: leftovers from an earlier test
         // (an old piston head, for example) would make the push fail
-        world.setBlock(pistonBase.north(2), Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(pistonBase.north(), Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(pistonBase, Blocks.PISTON.defaultBlockState()
-                .setValue(PistonBaseBlock.FACING, Direction.NORTH), Block.UPDATE_ALL);
-        world.setBlock(pistonBase.north(), Blocks.WHITE_WOOL.defaultBlockState(), Block.UPDATE_ALL);
-        world.setBlock(pistonBase.south(), Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
+        world.setBlock(pistonBase.north(2), net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(pistonBase.north(), net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(pistonBase, net.minecraft.world.level.block.Blocks.PISTON.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.piston.PistonBaseBlock.FACING, net.minecraft.core.Direction.NORTH), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(pistonBase.north(), net.minecraft.world.level.block.Blocks.WHITE_WOOL.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        world.setBlock(pistonBase.south(), net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK.defaultBlockState(), net.minecraft.world.level.block.Block.UPDATE_ALL);
+        return fireBase;
     }
 }

@@ -34,8 +34,8 @@
 
 ## 📥 安装
 
-1. 需要 **Java 21** 和 **Fabric Loader 0.16+**（服务端），并安装 **Fabric API**。
-2. 将 `coreprotect-fabric-1.21-1.9.3.jar` 放入服务端 `mods/` 文件夹。
+1. 需要 **Java 21** 和 **Fabric Loader ≥ 0.16.9**（服务端），并安装 **Fabric API ≥ 0.102.0+1.21**。
+2. 将 `coreprotect-fabric-1.21-1.9.4.jar` 放入服务端 `mods/` 文件夹。
 3. 启动服务器。数据库默认创建在游戏目录下的 `coreprotect.db`，配置在 `config/coreprotect-fabric.json`。
 
 ## 🛠 自行构建
@@ -43,7 +43,7 @@
 ```bash
 # 需要 JDK 21
 ./gradlew build
-# 产物位于 build/libs/coreprotect-fabric-1.21-1.9.3.jar
+# 产物位于 build/libs/coreprotect-fabric-1.21-1.9.4.jar
 ```
 
 ## 🎮 命令
@@ -217,7 +217,7 @@ SQLite（WAL 模式），默认位于游戏目录：`coreprotect.db`（可用 `d
 - 击杀记录不回滚（与原版 CoreProtect 一致）
 - 大型回滚在主线程执行（受 `maxBlocks` 上限保护）
 - 回滚后的容器物品找回策略：被取走的物品优先从容器中扣除并交还执行者，缺失部分会补发（简化版）
-- 自然事件通过 Mixin 挂钩实现，采用 best-effort 策略（`defaultRequire: 0`）：若未来 MC 版本改动导致个别挂钩失效，只会失去对应自然事件记录，不影响其他功能
+- 自然事件通过 Mixin 挂钩实现，采用强制策略（`defaultRequire: 1`）：若未来 MC 版本改动导致某个挂钩失效，服务端会在启动时报错并拒绝启动，而不是静默丢失该类记录
 
 ## 📜 许可
 

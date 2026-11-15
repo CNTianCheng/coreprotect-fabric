@@ -44,12 +44,43 @@ public final class LookupService {
             "item", "+item", "-item", "#item",
             "sign", "#sign");
 
+    /**
+     * Every cause name the mod writes into {@code co_action} with a leading {@code #}- see the
+     * "#explosion/#creeper/..." cause constants in CoreProtectFabric and the container/hopper/
+     * dispenser trackers.
+     */
+    private static final Set<String> KNOWN_HASH_ACTIONS = Set.of(
+            "explosion", "creeper", "tnt", "wither", "end_crystal", "enderman", "piston",
+            "water", "lava", "fluid", "fire", "decay", "hopper", "dropper", "dispenser",
+            "container", "kill", "kills", "death", "chat", "command", "session", "item", "sign");
+
     private LookupService() {
     }
 
+    /**
+     * Whether {@code action} can produce rows.
+     *
+     * <p>Any string starting with {@code #} used to pass this check, so a typo like
+     * {@code a:#contaner} took the block-cause path, returned no rows and printed
+     * "No results found" - indistinguishable from a database that really has no matching
+     * records (L4-12). Only the cause names the mod itself writes are accepted now.
+     */
     public static boolean isKnownAction(String action) {
+        if (action == null) return false;
         if (VALID_ACTIONS.contains(action)) return true;
-        return action != null && action.startsWith("#");
+        if (!action.startsWith("#")) return false;
+        return KNOWN_HASH_ACTIONS.contains(action.substring(1).toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /** Sorted, human readable list of the accepted {@code a:} values. */
+    public static String actionList() {
+        List<String> all = new ArrayList<>(VALID_ACTIONS);
+        for (String cause : KNOWN_HASH_ACTIONS) {
+            String hash = "#" + cause;
+            if (!all.contains(hash)) all.add(hash);
+        }
+        all.sort(String::compareTo);
+        return String.join(", ", all);
     }
 
     /**
@@ -62,6 +93,13 @@ public final class LookupService {
     private static final long CONSOLE_TIMEOUT_MS = 10_000L;
 
     /**
+     * {@code /co status} waits longer than a normal query: the eight table counts have their own
+     * 20 s budget inside the database, and answering before that budget expires made the command
+     * print "still running" while the counts kept running (L1-08).
+     */
+    public static final long STATUS_TIMEOUT_MS = 25_000L;
+
+    /**
      * Runs a query for a command and hands the result to {@code callback}.
      *
      * <p>Players get the non-blocking path: the query runs on the read pool and the callback
@@ -70,6 +108,12 @@ public final class LookupService {
      * still executing, so for them the query is awaited inline - with a time limit.
      */
     public static <T> void query(ServerCommandSource source, Callable<T> task, Consumer<T> callback) {
+        query(source, task, callback, CONSOLE_TIMEOUT_MS);
+    }
+
+    /** Same as {@link #query(ServerCommandSource, Callable, Consumer)} with an explicit budget. */
+    public static <T> void query(ServerCommandSource source, Callable<T> task, Consumer<T> callback,
+            long timeoutMs) {
         CoreProtectFabric mod = CoreProtectFabric.instance();
         if (mod == null) return;
         DatabaseManager db = mod.database();
@@ -84,13 +128,13 @@ public final class LookupService {
             return;
         }
         try {
-            callback.accept(future.get(CONSOLE_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+            callback.accept(future.get(timeoutMs, TimeUnit.MILLISECONDS));
         } catch (TimeoutException e) {
-            Messages.error(source, "coreprotect.error.db",
-                    "the query is still running - its result will follow in the server log");
+            // "Still running" is not a failure: the future is re-attached below and the result is
+            // delivered later, so the message must not claim the query failed (L1-03/L4-16).
+            Messages.cmd(source, "coreprotect.still_running", timeoutMs / 1000L);
             CoreProtectFabric.LOGGER.warn("[CoreProtect] Command answered after waiting {} ms for a"
-                    + " query that is still running; the result will be logged when it is ready.",
-                    CONSOLE_TIMEOUT_MS);
+                    + " query that is still running; the result will be sent when it is ready.", timeoutMs);
             future.thenAccept(value -> {
                 MinecraftServer server = mod.server();
                 if (server != null) {
@@ -116,6 +160,8 @@ public final class LookupService {
         String action = c.action == null ? "block" : c.action;
         if (!isKnownAction(action)) {
             Messages.error(source, "coreprotect.error.invalid_action", action);
+            // name the accepted values instead of leaving the caller to guess
+            Messages.cmd(source, "coreprotect.lookup.action_list", actionList());
             return 0;
         }
 
@@ -152,7 +198,9 @@ public final class LookupService {
     private static void sendRows(ServerCommandSource source, Criteria c, int pageSize, QueryResult result) {
         // a failed read (timeout / SQL error) must never be reported as "no results"
         if (result == null || result.failed()) {
-            Messages.error(source, "coreprotect.error.db", "database read failed");
+            // the message is self-contained (it points at the server log); the old version took a
+            // hardcoded English string as {0}, which leaked English into translated output (L4-16)
+            Messages.error(source, "coreprotect.error.db");
             return;
         }
         List<Text> rows = new ArrayList<>();
@@ -238,7 +286,7 @@ public final class LookupService {
             String verb = t.get(p, deposit ? "coreprotect.action.deposited" : "coreprotect.action.withdrew");
             rows.add(row(ago, deposit ? Formatting.GREEN : Formatting.RED, deposit ? "+" : "-",
                     causeName(t, p, l.user()), verb,
-                    List.of(Text.literal(l.amount() + "x ").formatted(Formatting.WHITE),
+                    List.of(Text.literal(l.amount() + "x").formatted(Formatting.WHITE),
                             Text.literal(BlockStateUtil.displayName(l.data())).formatted(Formatting.DARK_AQUA))));
         }
         return rows;
@@ -255,7 +303,7 @@ public final class LookupService {
             String verb = t.get(p, pickup ? "coreprotect.action.picked_up" : "coreprotect.action.dropped");
             rows.add(row(ago, pickup ? Formatting.GREEN : Formatting.RED, pickup ? "+" : "-",
                     causeName(t, p, l.user()), verb,
-                    List.of(Text.literal(l.amount() + "x ").formatted(Formatting.WHITE),
+                    List.of(Text.literal(l.amount() + "x").formatted(Formatting.WHITE),
                             Text.literal(BlockStateUtil.displayName(l.data())).formatted(Formatting.DARK_AQUA))));
         }
         return rows;

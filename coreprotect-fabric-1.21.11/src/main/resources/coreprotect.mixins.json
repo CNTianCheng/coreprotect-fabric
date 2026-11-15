@@ -15,13 +15,21 @@
     "EndermanPickupMixin",
     "EndermanPlaceMixin",
     "PistonBlockEntityMixin",
+    "PistonBlockMixin",
     "ServerPlayerEntityMixin",
     "ServerPlayNetworkHandlerMixin",
+    "CommandManagerMixin",
     "HopperBlockEntityMixin",
     "DispenserBlockMixin",
     "DropperBlockMixin",
     "PlayerEntityDropMixin",
-    "ItemEntityPickupMixin"
+    "ItemEntityPickupMixin",
+    "FallingBlockEntityMixin",
+    "AbstractBlockStateRandomTickMixin",
+    "BedBlockMixin",
+    "RespawnAnchorBlockMixin",
+    "FarmlandBlockMixin",
+    "EntityRemovalMixin"
   ],
   "client": []
 }

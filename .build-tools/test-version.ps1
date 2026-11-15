@@ -5,6 +5,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+
+# -WorkDir has to resolve to an existing directory inside this repository (audit
+# L5-06). It is checked here as well, so a typo can never point the test server
+# at C:\ or at another checkout.
+. (Join-Path $PSScriptRoot 'lib\kill-java.ps1')
+$WorkDir = Assert-WorkDir -WorkDir $WorkDir -Root $root
+
 $jdk = Join-Path $root ".build-tools\jdk\$Jdk"
 if (-not (Test-Path $jdk)) { $jdk = 'C:\Program Files\java\graalvm-jdk-25.0.2+10.1' }
 $env:JAVA_HOME = $jdk

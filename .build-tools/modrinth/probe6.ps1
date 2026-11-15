@@ -9,12 +9,17 @@
     payload-1 with an explicit application/octet-stream Content-Type as a diagnostic, which
     created a second Modrinth version on every release (the extra 1.9.2 version had to be
     deleted by hand); that second upload is gone and the code path no longer exists.
+
+    READ-ONLY BY DEFAULT (audit L5-16): running this script as-is only lists the payloads it
+    would upload and exits with PROBE6_PREVIEW_DONE. Nothing is uploaded unless
+    -YesICreateAVersion is passed explicitly.
 #>
 [CmdletBinding()]
 param(
     [string]$Token,
     [string]$Root,
-    [int]$Max = 3
+    [int]$Max = 3,
+    [switch]$YesICreateAVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,12 +30,34 @@ $here = $PSScriptRoot
 $api = 'https://api.modrinth.com/v2'
 $ua = 'CNTianCheng/coreprotect-fabric (https://github.com/CNTianCheng/coreprotect-fabric)'
 if (-not $Root) { $Root = (Resolve-Path (Join-Path $here '..\..')).Path }
+$versions = ([System.IO.File]::ReadAllText((Join-Path $here 'versions.json'), [System.Text.Encoding]::UTF8)) | ConvertFrom-Json
+
+if (-not $YesICreateAVersion) {
+    Write-Host '--- probe6 PREVIEW - nothing is sent, nothing is created ---'
+    Write-Host 'Pass -YesICreateAVersion to really POST these; each upload creates a live Modrinth version.'
+    for ($i = 1; $i -le $Max; $i++) {
+        $payloadPath = Join-Path $here ("payload-{0}.json" -f $i)
+        if (-not (Test-Path -LiteralPath $payloadPath)) {
+            Write-Host ("  payload-{0}  (no such payload file - skipped)" -f $i)
+            continue
+        }
+        $v = $versions[$i - 1]
+        if (-not $v) {
+            Write-Host ("  payload-{0}  (versions.json has no entry {1} - skipped)" -f $i, $i)
+            continue
+        }
+        $jar = Join-Path $Root ($v.file -replace '/', '\')
+        $jarState = if (Test-Path -LiteralPath $jar) { $v.file } else { 'MISSING jar - would be skipped' }
+        Write-Host ("  payload-{0}  version={1} mc={2} jar={3}" -f $i, $v.version_number, ($v.game_versions -join ','), $jarState)
+    }
+    Write-Host 'PROBE6_PREVIEW_DONE'
+    return
+}
 
 if (-not $Token) {
     $lines = @(Get-Content -LiteralPath (Join-Path $here 'token.txt') | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })
     $Token = $lines[0].Trim()
 }
-$versions = ([System.IO.File]::ReadAllText((Join-Path $here 'versions.json'), [System.Text.Encoding]::UTF8)) | ConvertFrom-Json
 
 function Send-Dump {
     param(
@@ -79,6 +106,7 @@ function Send-Dump {
 }
 
 # One upload per payload - see the header: never send the same payload twice.
+Write-Host '--- probe6 (each upload creates a live version) ---'
 for ($i = 1; $i -le $Max; $i++) {
     $payloadPath = Join-Path $here ("payload-{0}.json" -f $i)
     if (-not (Test-Path -LiteralPath $payloadPath)) { continue }

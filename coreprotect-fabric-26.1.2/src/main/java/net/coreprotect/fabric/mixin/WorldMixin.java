@@ -1,6 +1,7 @@
 package net.coreprotect.fabric.mixin;
 
 import net.coreprotect.fabric.CoreProtectFabric;
+import net.coreprotect.fabric.util.NaturalBreakCause;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.core.BlockPos;
@@ -18,7 +19,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * <p>All four injectors stay at HEAD on purpose: the hooks need the block state BEFORE
  * the write. At RETURN {@code Level#getBlockState} already reports the new state, so every
  * natural change would compare equal and disappear from the log, and the return value of
- * {@code removeBlock}/{@code breakBlock} says nothing about a rejected write either. The
+ * {@code removeBlock}/{@code destroyBlock} says nothing about a rejected write either. The
  * writes vanilla rejects are filtered inside the hooks instead - see
  * {@code CoreProtectFabric#hookSetBlockState} (E11).</p>
  */
@@ -29,14 +30,16 @@ public abstract class WorldMixin {
             at = @At("HEAD"))
     private void coreprotect$hookSetBlockState4(BlockPos pos, BlockState state, int flags, int maxUpdateDepth,
                                                 CallbackInfoReturnable<Boolean> cir) {
-        CoreProtectFabric.hookSetBlockState((Level) (Object) this, pos, state);
+        // The vanilla flags are passed on: a write carrying Block#UPDATE_MOVE_BY_PISTON is the source cell of a
+        // piston move, which the piston hook records as its own row (L3-01/L2-11).
+        CoreProtectFabric.hookSetBlockState((Level) (Object) this, pos, state, flags);
     }
 
     @Inject(method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z",
             at = @At("HEAD"))
     private void coreprotect$hookSetBlockState3(BlockPos pos, BlockState state, int flags,
                                                 CallbackInfoReturnable<Boolean> cir) {
-        CoreProtectFabric.hookSetBlockState((Level) (Object) this, pos, state);
+        CoreProtectFabric.hookSetBlockState((Level) (Object) this, pos, state, flags);
     }
 
     @Inject(method = "destroyBlock(Lnet/minecraft/core/BlockPos;ZLnet/minecraft/world/entity/Entity;I)Z",

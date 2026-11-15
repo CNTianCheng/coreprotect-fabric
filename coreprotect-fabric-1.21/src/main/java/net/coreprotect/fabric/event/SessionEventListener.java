@@ -28,7 +28,13 @@ public final class SessionEventListener {
             if (lang != null && mod.translator().isAvailable(lang)) {
                 mod.translator().setOverride(player.getUuid(), lang);
             }
-            mod.database().submitRead(() -> mod.database().userLanguage(name), stored -> {
+            String uuid = player.getUuid().toString();
+            // the uuid row is authoritative; the name row only exists for players who picked a
+            // language before v1.9.4 (L4-15)
+            mod.database().submitRead(() -> {
+                String byUuid = mod.database().userLanguageByUuid(uuid);
+                return byUuid != null ? byUuid : mod.database().userLanguage(name);
+            }, stored -> {
                 mod.translator().cacheUserLanguage(name, stored);
                 if (stored == null || !mod.translator().isAvailable(stored)) return;
                 ServerPlayerEntity online = server.getPlayerManager().getPlayer(name);
@@ -37,14 +43,12 @@ public final class SessionEventListener {
             });
             if (mod.config().logging.session) {
                 mod.database().insertSessionAsync(TimeUtil.now(), name,
-                        player.getWorld().getRegistryKey().getValue().toString(), "+");
+                        player.getServerWorld().getRegistryKey().getValue().toString(), "+");
             }
             // New-version notice for admin players (level >= adminLevel).
-            // 1.21 test: Entity#hasPermissionLevel, the equivalent of 1.21.11's
-            // Permissions.hasLevel(source, level) -- same result for an exact 0..4 level.
             UpdateChecker checker = mod.updateChecker();
             if (checker != null && checker.available()
-                    && player.hasPermissionLevel(mod.config().permissions.adminLevel)) {
+                    && Permissions.hasLevel(player.getCommandSource(), mod.config().permissions.adminLevel)) {
                 server.execute(() -> Messages.cmd(player.getCommandSource(), "coreprotect.update.available",
                         checker.latestVersion(), CoreProtectFabric.MOD_VERSION, checker.latestUrl()));
             }
@@ -62,7 +66,7 @@ public final class SessionEventListener {
             mod.translator().setOverride(player.getUuid(), null);
             if (mod.config().logging.session) {
                 mod.database().insertSessionAsync(TimeUtil.now(), player.getGameProfile().getName(),
-                        player.getWorld().getRegistryKey().getValue().toString(), "-");
+                        player.getServerWorld().getRegistryKey().getValue().toString(), "-");
             }
         });
     }

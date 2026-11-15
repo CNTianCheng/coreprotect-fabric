@@ -26,8 +26,13 @@ public abstract class FireBlockMixin {
         NaturalBreakCause.set("#fire");
     }
 
+    // L3-02: @At("TAIL") only matches the LAST return instruction, but scheduledTick has two
+    // normal returns (FireBlock.java:157 when nothing around is burnable, :162 when the fire is
+    // at its last age and cannot spread down). Every earlier return skipped this injector, so
+    // the #fire window stayed open and its depth never fell back to 0 - every later block change
+    // on this server thread was then attributed to #fire. RETURN is applied to every return.
     @Inject(method = "scheduledTick(Lnet/minecraft/block/BlockState;Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/util/math/random/Random;)V",
-            at = @At("TAIL"))
+            at = @At("RETURN"))
     private void coreprotect$fireEnd(BlockState state, ServerWorld world, BlockPos pos, Random random,
                                      CallbackInfo ci) {
         NaturalBreakCause.clear("#fire");
